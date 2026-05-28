@@ -24,7 +24,7 @@ from google.oauth2.service_account import Credentials
 # КОНФИГ
 # ──────────────────────────────────────────────────────────────
 BOT_TOKEN      = "8897475918:AAEzrPd1IuCNmy8XUiWsFNlqy13LTscqonM"
-ANTHROPIC_KEY  = "ВСТАВЬ_СЮДА_SK-ANT"   # вставишь прямо на сервере
+ANTHROPIC_KEY  = "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"   # вставишь прямо на сервере
 OPENAI_KEY     = "sk-mfvVI3QN2uQvXPlhMkAeUUzmbjK5aQzj"
 OWNER_ID       = 549639607
 SPREADSHEET_ID = "1PE7CaFuWOe_eygQqIoMAmUdJBtATbIaNfZR4cvarPCA"
