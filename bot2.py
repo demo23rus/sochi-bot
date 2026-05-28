@@ -70,14 +70,14 @@ CITY_KEYBOARD = ReplyKeyboardMarkup(
 # ──────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text="🏙 Сменить город"),    KeyboardButton(text="🌦 Погода")],
         [KeyboardButton(text="🍽 Где поесть"),       KeyboardButton(text="☕ Кофе с видом")],
         [KeyboardButton(text="🌅 На рассвет"),       KeyboardButton(text="🎭 Куда сходить")],
         [KeyboardButton(text="👨‍👩‍👧 С детьми"),      KeyboardButton(text="💑 Романтика")],
         [KeyboardButton(text="🏔 На природу"),       KeyboardButton(text="🌃 Вечер")],
-        [KeyboardButton(text="🗺 Маршрут на день"),  KeyboardButton(text="🌦 Погода")],
-        [KeyboardButton(text="💬 Местный советует"), KeyboardButton(text="✏️ Свой вопрос")],
-        [KeyboardButton(text="🏙 Сменить город"),    KeyboardButton(text="🛠 Поддержка")],
-        [KeyboardButton(text="💬 Оставить отзыв"), KeyboardButton(text="ℹ️ О проекте")],
+        [KeyboardButton(text="🗺 Маршрут на день"),  KeyboardButton(text="💬 Местный советует")],
+        [KeyboardButton(text="✏️ Свой вопрос"),      KeyboardButton(text="🛠 Поддержка")],
+        [KeyboardButton(text="💬 Оставить отзыв"),   KeyboardButton(text="ℹ️ О проекте")],
     ],
     resize_keyboard=True,
     one_time_keyboard=False,
@@ -334,7 +334,7 @@ def get_system_prompt(city):
 - Район города?
 - Бюджет? (бюджетно / средне / дорого)
 - С кем? (один, пара, семья, компания)
-Добавь в конце: "Или напиши всё сразу своими словами 🚀"
+Задай ВСЕ вопросы СРАЗУ одним сообщением. В конце всегда пиши: "Ответь одним сообщением — текстом или голосовым 🎤"
 
 КНОПКА "КУДА СХОДИТЬ":
 Спроси что интересует — концерт, театр, выставка, спорт, фестиваль?
