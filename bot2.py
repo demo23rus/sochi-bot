@@ -78,6 +78,7 @@ MAIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="🗺 Маршрут на день"),  KeyboardButton(text="💬 Местный советует")],
         [KeyboardButton(text="🌦 Погода"),           KeyboardButton(text="🛠 Поддержка")],
         [KeyboardButton(text="💬 Оставить отзыв"),   KeyboardButton(text="ℹ️ О проекте")],
+        [KeyboardButton(text="🏠 Главное меню")],
     ],
     resize_keyboard=True,
     one_time_keyboard=False,
@@ -90,7 +91,7 @@ THEME_BUTTONS = {
 }
 SYSTEM_BUTTONS = {
     "✏️ Свой вопрос", "🛠 Поддержка", "ℹ️ О проекте",
-    "🏙 Сменить город", "🌦 Погода", "💬 Оставить отзыв",
+    "🏙 Сменить город", "🌦 Погода", "💬 Оставить отзыв", "🏠 Главное меню",
 }
 
 BACK_TEXT = "\n\nЧто ещё найти? Жми кнопку или пиши 👇"
