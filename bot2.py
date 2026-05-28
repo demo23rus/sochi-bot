@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Местный — мультигород v2
-Bot: @SochiTestBot
+AI Местный — мультигород v3
+Bot: @mestniy_guide_bot
 File: /root/bot2.py
 Service: sochi-test
 """
@@ -12,7 +12,7 @@ import os
 import sqlite3
 import tempfile
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import requests
 
@@ -29,7 +29,7 @@ from google.oauth2.service_account import Credentials
 # ──────────────────────────────────────────────────────────────
 # КОНФИГ
 # ──────────────────────────────────────────────────────────────
-BOT_TOKEN      = "8885258205:AAHxFSJg4AU_Lh3efzlFPi2tK9ql1L-zC9A"
+BOT_TOKEN      = "8885258205:AAEVDmHIpAHaHZmdnlKMnY4r46txWRefQPQ"
 OPENAI_KEY     = "sk-mfvVI3QN2uQvXPlhMkAeUUzmbjK5aQzj"
 WEATHER_KEY    = "566d8e1d3d55c9dd92b4f80938dd4a6b"
 OWNER_ID       = 549639607
@@ -71,13 +71,13 @@ CITY_KEYBOARD = ReplyKeyboardMarkup(
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✏️ Свой вопрос"),      KeyboardButton(text="🏙 Сменить город")],
-        [KeyboardButton(text="🍽 Где поесть"),       KeyboardButton(text="☕ Кофе с видом")],
-        [KeyboardButton(text="🌅 На рассвет"),       KeyboardButton(text="🎭 Куда сходить")],
-        [KeyboardButton(text="👨‍👩‍👧 С детьми"),      KeyboardButton(text="💑 Романтика")],
-        [KeyboardButton(text="🏔 На природу"),       KeyboardButton(text="🌃 Вечер")],
-        [KeyboardButton(text="🗺 Маршрут на день"),  KeyboardButton(text="💬 Местный советует")],
-        [KeyboardButton(text="🌦 Погода"),           KeyboardButton(text="🛠 Поддержка")],
-        [KeyboardButton(text="💬 Оставить отзыв"),   KeyboardButton(text="ℹ️ О проекте")],
+        [KeyboardButton(text="🍽 Где поесть"),        KeyboardButton(text="☕ Кофе с видом")],
+        [KeyboardButton(text="🌅 На рассвет"),        KeyboardButton(text="🎭 Куда сходить")],
+        [KeyboardButton(text="👨‍👩‍👧 С детьми"),       KeyboardButton(text="💑 Романтика")],
+        [KeyboardButton(text="🏔 На природу"),        KeyboardButton(text="🌃 Вечер")],
+        [KeyboardButton(text="🗺 Маршрут на день"),   KeyboardButton(text="💬 Местный советует")],
+        [KeyboardButton(text="🌦 Погода"),            KeyboardButton(text="🛠 Поддержка")],
+        [KeyboardButton(text="💬 Оставить отзыв"),    KeyboardButton(text="ℹ️ О проекте")],
         [KeyboardButton(text="🏠 Главное меню")],
     ],
     resize_keyboard=True,
@@ -100,7 +100,7 @@ BACK_TEXT = "\n\nЧто ещё найти? Жми кнопку или пиши �
 # FSM
 # ──────────────────────────────────────────────────────────────
 class UserState(StatesGroup):
-    choosing_city = State()
+    choosing_city  = State()
     writing_review = State()
 
 # ──────────────────────────────────────────────────────────────
@@ -193,10 +193,14 @@ WEATHER_ICONS = {
 
 def get_weather_today(city_key):
     try:
-        owm = CITIES[city_key]["owm"]
-        r   = requests.get(
+        owm = CITIES.get(city_key, {}).get("owm")
+        if not owm:
+            return None
+        r = requests.get(
             f"https://api.openweathermap.org/data/2.5/weather?q={owm}&appid={WEATHER_KEY}&units=metric&lang=ru",
             timeout=5).json()
+        if r.get("cod") != 200:
+            return None
         temp  = round(r["main"]["temp"])
         feels = round(r["main"]["feels_like"])
         desc  = r["weather"][0]["description"].capitalize()
@@ -209,26 +213,26 @@ def get_weather_today(city_key):
 
 def get_weather_forecast(city_key):
     try:
-        owm  = CITIES[city_key]["owm"]
-        r    = requests.get(
+        owm = CITIES.get(city_key, {}).get("owm")
+        if not owm:
+            return None
+        r = requests.get(
             f"https://api.openweathermap.org/data/2.5/forecast?q={owm}&appid={WEATHER_KEY}&units=metric&lang=ru&cnt=40",
             timeout=5).json()
         days = {}
         for item in r["list"]:
             dt   = datetime.fromtimestamp(item["dt"])
             date = dt.strftime("%d.%m")
-            day  = dt.strftime("%A")
-            key  = f"{date} ({day})"
-            if key not in days:
-                days[key] = {
+            if date not in days:
+                days[date] = {
                     "min":  item["main"]["temp_min"],
                     "max":  item["main"]["temp_max"],
                     "desc": item["weather"][0]["description"],
                     "main": item["weather"][0]["main"],
                 }
             else:
-                days[key]["min"] = min(days[key]["min"], item["main"]["temp_min"])
-                days[key]["max"] = max(days[key]["max"], item["main"]["temp_max"])
+                days[date]["min"] = min(days[date]["min"], item["main"]["temp_min"])
+                days[date]["max"] = max(days[date]["max"], item["main"]["temp_max"])
         lines = []
         for date, d in list(days.items())[:5]:
             icon = WEATHER_ICONS.get(d["main"], "🌤")
@@ -276,7 +280,7 @@ MORNING_TIPS = {
         "Рыбная деревня без туристов — рано утром совсем другое настроение. Кофе у набережной.",
         "Форт Фридрихсбург — мало кто знает, почти всегда пустой. Прусская история рядом.",
         "Янтарный берег — янтарь выбрасывает после шторма. Местные это знают и ходят собирать.",
-        "Кёнигсберг в деталях: загляни во дворы старых немецких домов — там сохранилась настоящая архитектура.",
+        "Загляни во дворы старых немецких домов — там сохранилась настоящая прусская архитектура.",
     ],
     "Екатеринбург": [
         "Плотинка утром — место где начинался Екатеринбург. Тихо и атмосферно.",
@@ -308,38 +312,36 @@ def get_system_prompt(city):
 - Текст пиши обычный, без форматирования.
 
 ФОРМАТ КАЖДОГО МЕСТА:
-(просто цифра и название, без жирного)
 1. Название места
 📍 Район или улица
-💚 Бюджетно / 💛 Средне / 💸 Дорого  (выбери одно)
+💚 Доступные цены / 💛 Средние цены / 💰 Цены выше среднего  (выбери одно подходящее)
 ✨ Фишка — почему стоит идти (1-2 предложения живым языком)
 🗺 Яндекс.Карты: https://yandex.ru/maps/?text=Название+места+{city.replace(' ', '+')}
-⚠️ Актуальные цены и часы уточняйте по телефону или в Яндекс.Картах
+🗺 2ГИС: https://2gis.ru/search/Название+места+{city.replace(' ', '+')}
+⚠️ Актуальные цены и часы уточняйте по телефону или по ссылкам выше
 
 ПРАВИЛА ПРО БЮДЖЕТ:
 - Никогда не пиши конкретные цены в рублях — они устаревают.
 - Только категорию: 💚 Доступные цены / 💛 Средние цены / 💰 Цены выше среднего
 - Если человек не указал бюджет — давай места разных категорий.
-- Если сказал "недорого", "бюджетно", "до 500 рублей" — только 💚 бюджетные.
+- Если сказал "недорого", "бюджетно", "дёшево" — только 💚 доступные.
 - Если "романтично", "красиво", "особый вечер" — 💛 и 💰.
 
 ПРАВИЛА ПРО ДАННЫЕ:
-- Никогда не выдумывай телефоны. Совсем. Даже если очень хочется.
+- Никогда не выдумывай телефоны. Совсем.
 - Не пиши конкретные цены — только категорию бюджета.
-- Если не уверен в данных — не пиши их, лучше дай ссылку на Яндекс.Карты.
+- Если не уверен в данных — не пиши их, дай ссылку на карты.
 
-КОЛИЧЕСТВО МЕСТ: давай 3-5 мест в ответе.
+КОЛИЧЕСТВО МЕСТ: давай 5-7 мест в ответе.
 
 ПРАВИЛО КНОПОК — САМОЕ ВАЖНОЕ:
-Когда человек нажимает любую тематическую кнопку — СРАЗУ давай подборку 3-5 лучших мест БЕЗ ВОПРОСОВ.
-Никогда не спрашивай про бюджет, компанию, возраст, настроение — человек сам уточнит если нужно.
-Категорию цены (💚💛💰) просто указывай рядом с каждым местом как информацию.
-Единственный случай когда можно задать ОДИН вопрос — если город большой (Москва, СПб) и район реально важен для результата. Тогда только: "Какой район города?" — и всё.
+Когда человек нажимает любую тематическую кнопку — СРАЗУ давай подборку 5-7 мест БЕЗ ВОПРОСОВ.
+Никогда не спрашивай про бюджет, компанию, возраст — человек сам уточнит если нужно.
+Единственный случай когда можно задать ОДИН вопрос — если город большой (Москва, СПб) и район реально важен. Тогда только: "Какой район?" — и всё.
 
 КНОПКА "КУДА СХОДИТЬ":
-Спроси что интересует — концерт, театр, выставка, спорт, фестиваль?
-Расскажи какие площадки есть в {city} для этого типа событий.
-Дай прямые ссылки на актуальную афишу:
+Расскажи какие площадки есть в {city} для концертов, театров, выставок.
+Дай ссылки на актуальную афишу:
 - https://kudago.com/{city.lower().replace(' ', '-')}
 - https://afisha.yandex.ru/{city.lower().replace(' ', '-')}
 Честно скажи что конкретное расписание лучше смотреть там.
@@ -352,7 +354,7 @@ def get_system_prompt(city):
 КНОПКА "МЕСТНЫЙ СОВЕТУЕТ":
 Дай один интересный лайфхак или инсайд про {city}.
 Только общие советы — про районы, традиции, транспорт, еду.
-Не упоминай конкретные заведения с ценами — они меняются.
+Не упоминай конкретные заведения с ценами.
 Формат: короткий, живой, как совет от друга. 3-5 предложений.
 
 Если человек пишет про другой город — скажи что пока работаешь по {city}, предложи сменить город кнопкой 🏙 Сменить город."""
@@ -388,6 +390,8 @@ def _log_sync(user_id, name, username, msg_type, text, resp_len=0):
     except Exception as e:
         logging.error(f"Sheets error: {e}")
 
+async def log_sheets(user_id, name, username, msg_type, text, resp_len=0):
+    await asyncio.get_event_loop().run_in_executor(None, _log_sync, user_id, name, username, msg_type, text, resp_len)
 
 def _log_review_sync(user_id, name, username, city, review_text):
     try:
@@ -402,9 +406,6 @@ def _log_review_sync(user_id, name, username, city, review_text):
 
 async def log_review(user_id, name, username, city, review_text):
     await asyncio.get_event_loop().run_in_executor(None, _log_review_sync, user_id, name, username, city, review_text)
-
-async def log_sheets(user_id, name, username, msg_type, text, resp_len=0):
-    await asyncio.get_event_loop().run_in_executor(None, _log_sync, user_id, name, username, msg_type, text, resp_len)
 
 # ──────────────────────────────────────────────────────────────
 # УТРЕННЯЯ РАССЫЛКА
@@ -424,7 +425,7 @@ async def send_morning_messages():
                 f"Совет дня:\n{tip}\n\n"
                 f"Чем могу помочь сегодня? 👇"
             )
-            await bot.send_message(user_id, text, reply_markup=MAIN_KB)
+            await bot.send_message(user_id, text, reply_markup=MAIN_KB, disable_web_page_preview=True)
             await asyncio.sleep(0.05)
         except Exception as e:
             logging.error(f"Morning error {user_id}: {e}")
@@ -434,7 +435,6 @@ async def morning_scheduler():
         now    = datetime.now(MOSCOW_TZ)
         target = now.replace(hour=9, minute=0, second=0, microsecond=0)
         if now >= target:
-            from datetime import timedelta
             target += timedelta(days=1)
         await asyncio.sleep((target - now).total_seconds())
         await send_morning_messages()
@@ -465,6 +465,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"Твой город: {city_key}{w_text}\n\n"
             f"Жми кнопку или спрашивай — найду лучшее 👇",
             reply_markup=MAIN_KB,
+            disable_web_page_preview=True,
         )
         save_user(user.id, name, user.username, city, city_key)
     else:
@@ -475,6 +476,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             "Покажу кафе, маршруты и события — те о которых не пишут в путеводителях.\n\n"
             "Выбери свой город 👇",
             reply_markup=CITY_KEYBOARD,
+            disable_web_page_preview=True,
         )
         await state.set_state(UserState.choosing_city)
 
@@ -497,6 +499,21 @@ async def handle_city_choice(msg: Message, state: FSMContext):
         f"Теперь я твой местный гид по {city}.\n"
         f"Жми кнопку или спрашивай сразу 👇",
         reply_markup=MAIN_KB,
+        disable_web_page_preview=True,
+    )
+
+
+@dp.message(F.text == "🏠 Главное меню")
+async def btn_main_menu(msg: Message, state: FSMContext):
+    await state.clear()
+    user = msg.from_user
+    city, city_key = get_user_city(user.id)
+    weather = get_weather_today(city_key)
+    w_text  = f"\n{weather}" if weather else ""
+    await msg.answer(
+        f"Главное меню 🏠\n\nТвой город: {city_key}{w_text}\n\nЧем могу помочь? 👇",
+        reply_markup=MAIN_KB,
+        disable_web_page_preview=True,
     )
 
 
@@ -516,6 +533,7 @@ async def btn_weather(msg: Message):
             f"Данные от OpenWeatherMap. Подробнее на Яндекс.Погода 🌤"
             f"{BACK_TEXT}",
             reply_markup=MAIN_KB,
+            disable_web_page_preview=True,
         )
     else:
         await msg.answer(
@@ -559,6 +577,7 @@ async def _send_about(msg: Message):
         "Замечания и идеи — жми Поддержка.\n\n"
         f"Тестовая версия.{BACK_TEXT}",
         reply_markup=MAIN_KB,
+        disable_web_page_preview=True,
     )
 
 
@@ -579,6 +598,14 @@ async def btn_support(msg: Message):
     except Exception as e:
         logging.error(f"Owner notify: {e}")
 
+
+@dp.message(F.text == "✏️ Свой вопрос")
+async def btn_own(msg: Message):
+    city, _ = get_user_city(msg.from_user.id)
+    await msg.answer(
+        f"Пиши любой вопрос про {city} — отвечу 🚀",
+        reply_markup=MAIN_KB,
+    )
 
 
 @dp.message(F.text == "💬 Оставить отзыв")
@@ -601,24 +628,14 @@ async def handle_review(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Хорошо, в другой раз 👌", reply_markup=MAIN_KB)
         return
-    user     = msg.from_user
-    city, _  = get_user_city(user.id)
+    user    = msg.from_user
+    city, _ = get_user_city(user.id)
     await state.clear()
     await msg.answer(
         "Спасибо за отзыв! 🙏 Это очень помогает делать бота лучше." + BACK_TEXT,
         reply_markup=MAIN_KB,
     )
-    asyncio.create_task(log_review(
-        user.id, full_name(user), user.username, city, text
-    ))
-
-@dp.message(F.text == "✏️ Свой вопрос")
-async def btn_own(msg: Message):
-    city, _ = get_user_city(msg.from_user.id)
-    await msg.answer(
-        f"Пиши любой вопрос про {city} — отвечу 🚀",
-        reply_markup=MAIN_KB,
-    )
+    asyncio.create_task(log_review(user.id, full_name(user), user.username, city, text))
 
 
 # ── Голосовые ─────────────────────────────────────────────────
@@ -638,7 +655,7 @@ async def handle_voice(msg: Message):
         text = transcript.text.strip()
         if not text:
             await msg.answer(
-                f"Не смог распознать голосовое. Попробуй написать текстом 👇{BACK_TEXT}",
+                f"Не смог распознать. Попробуй написать текстом 👇{BACK_TEXT}",
                 reply_markup=MAIN_KB)
             return
         city, _ = get_user_city(msg.from_user.id)
@@ -648,7 +665,7 @@ async def handle_voice(msg: Message):
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB)
+        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB, disable_web_page_preview=True)
         increment_requests(msg.from_user.id)
         asyncio.create_task(log_sheets(
             msg.from_user.id, full_name(msg.from_user),
@@ -679,7 +696,7 @@ async def handle_text(msg: Message, state: FSMContext):
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB)
+        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB, disable_web_page_preview=True)
         increment_requests(user.id)
         asyncio.create_task(log_sheets(
             user.id, full_name(user), user.username, msg_type, text, len(answer)))
@@ -698,8 +715,8 @@ async def handle_text(msg: Message, state: FSMContext):
 @dp.message()
 async def fallback(msg: Message):
     await msg.answer(
-        f"Я понимаю только текст и голосовые сообщения.\n\n"
-        f"Фото, стикеры и документы пока не поддерживаются.\n\n"
+        "Я понимаю только текст и голосовые сообщения.\n\n"
+        "Фото, стикеры и документы пока не поддерживаются.\n\n"
         f"Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
@@ -711,7 +728,7 @@ async def fallback(msg: Message):
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     init_db()
-    logging.info("AI Местный v2 запущен")
+    logging.info("AI Местный v3 запущен")
     asyncio.create_task(morning_scheduler())
     await dp.start_polling(bot)
 
