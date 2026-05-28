@@ -29,7 +29,7 @@ from google.oauth2.service_account import Credentials
 # ──────────────────────────────────────────────────────────────
 # КОНФИГ
 # ──────────────────────────────────────────────────────────────
-BOT_TOKEN      = "8897475918:AAEzrPd1IuCNmy8XUiWsFNlqy13LTscqonM"
+BOT_TOKEN      = "8885258205:AAHxFSJg4AU_Lh3efzlFPi2tK9ql1L-zC9A"
 OPENAI_KEY     = "sk-mfvVI3QN2uQvXPlhMkAeUUzmbjK5aQzj"
 WEATHER_KEY    = "566d8e1d3d55c9dd92b4f80938dd4a6b"
 OWNER_ID       = 549639607
