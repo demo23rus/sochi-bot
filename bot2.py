@@ -289,21 +289,29 @@ async def ask_ai(text, city):
     return await asyncio.get_event_loop().run_in_executor(None, _ask_sync, text, city)
 
 def _morning_sync(city, zodiac):
-    zodiac_part = ""
-    if zodiac and zodiac != "skip":
-        zodiac_part = f"\n2. Персональный гороскоп для знака {zodiac} на сегодня (2-3 предложения, позитивный и вдохновляющий, конкретный совет на день)"
+    has_zodiac = zodiac and zodiac != "skip"
 
-    prompt = f"""Напиши короткое утреннее сообщение на русском языке.
+    if has_zodiac:
+        zodiac_block = "2. Персональный гороскоп для знака " + zodiac + " на сегодня (2-3 предложения, позитивный и вдохновляющий, конкретный совет на день)"
+        format_block = zodiac + " сегодня:\n[гороскоп]"
+    else:
+        zodiac_block = ""
+        format_block = ""
 
-Структура:
-1. Один интересный и неожиданный факт о городе {city} который мало кто знает (2-3 предложения){zodiac_part}
+    structure = "1. Один интересный и неожиданный факт о городе " + city + " который мало кто знает (2-3 предложения)"
+    if zodiac_block:
+        structure += "\n" + zodiac_block
 
-Формат ответа (строго):
-🏛 Факт о {city}:
-[факт]
-{"" if not zodiac or zodiac == "skip" else f"\n{zodiac} сегодня:\n[гороскоп]"}
+    fmt = "🏛 Факт о " + city + ":\n[факт]"
+    if format_block:
+        fmt += "\n\n" + format_block
 
-Стиль: тёплый, дружеский, живой язык. Никакого markdown форматирования."""
+    prompt = (
+        "Напиши короткое утреннее сообщение на русском языке.\n\n"
+        "Структура:\n" + structure + "\n\n"
+        "Формат ответа (строго):\n" + fmt + "\n\n"
+        "Стиль: тёплый, дружеский, живой язык. Никакого markdown форматирования."
+    )
 
     response = client.chat.completions.create(
         model=MODEL,
