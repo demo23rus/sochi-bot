@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Местный — мультигород v5
+AI Местный — мультигород v5.1
 Bot: @mestniy_guide_bot
 File: /root/bot2.py
 Service: sochi-test
@@ -182,7 +182,7 @@ SYSTEM_BUTTONS = {
     "◀️ Назад к городам",
 }
 
-BACK_TEXT = "\n\nЧто ещё найти? Жми кнопку или пиши 👇"
+BACK_TEXT = "\n\n✨ Что ещё найдём? Жми или пиши 👇"
 
 # ──────────────────────────────────────────────────────────────
 # FSM
@@ -574,7 +574,13 @@ async def send_morning_messages():
     for user_id, city, zodiac in users:
         try:
             msg_text  = await get_morning_msg(city, zodiac)
-            full_text = f"Доброе утро! ☀️\n\n{msg_text}\n\nЧем могу помочь сегодня? 👇"
+            full_text = (
+                f"☀️ Доброе утро!\n\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"{msg_text}\n"
+                f"━━━━━━━━━━━━━━━\n\n"
+                f"🗺 Чем могу помочь сегодня? Жми кнопку или пиши 👇"
+            )
             await bot.send_message(user_id, full_text, reply_markup=MAIN_KB, disable_web_page_preview=True)
             await asyncio.sleep(0.1)
         except Exception as e:
@@ -630,19 +636,27 @@ async def cmd_start(msg: Message, state: FSMContext):
         city_key = existing[4]
         save_user(user.id, name, user.username, city, city_key)
         await msg.answer(
-            f"Привет, {user.first_name or 'друг'}! 👋\n\n"
-            f"Твой город: {city_key}\n\n"
-            f"Жми кнопку или спрашивай — найду лучшее 👇",
+            f"👋 Привет, {user.first_name or 'друг'}! Рад видеть тебя снова!\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🏙 Твой город: {city_key}\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"🗺 Готов искать лучшие места — жми кнопку или пиши 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
     else:
         save_user(user.id, name, user.username, ref_by=ref_by)
         await msg.answer(
-            f"Привет, {user.first_name or 'друг'}! 👋\n\n"
-            "Я AI Местный — гид по городам России глазами местных жителей.\n\n"
-            "Покажу кафе, маршруты и события — те о которых не пишут в путеводителях.\n\n"
-            "Выбери свой город 👇",
+            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🗺 Я AI Местный — твой городской гид\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"🏘 Показываю города глазами тех, кто там живёт:\n"
+            f"🍽 Кафе куда ходят местные, а не туристы\n"
+            f"📍 Места которых нет в топе Google Maps\n"
+            f"🎭 События о которых узнают за день\n"
+            f"🗺 Маршруты без толпы\n\n"
+            f"🏙 Выбери свой город 👇",
             reply_markup=CITY_KEYBOARD,
         )
         await state.set_state(UserState.choosing_city)
@@ -657,14 +671,16 @@ async def handle_city_choice(msg: Message, state: FSMContext):
     # Крым — показываем подменю
     if text == "🏖 Крым":
         await msg.answer(
-            "🏖 Крым — выбери город 👇",
+            "🏖 Крым — солнце, море и история!\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "Выбери город 👇",
             reply_markup=CRIMEA_KEYBOARD,
         )
         await state.set_state(UserState.choosing_crimea)
         return
 
     if text not in CITIES:
-        await msg.answer("Выбери город из списка 👇", reply_markup=CITY_KEYBOARD)
+        await msg.answer("🏙 Выбери город из списка 👇", reply_markup=CITY_KEYBOARD)
         return
 
     await _finalize_city_choice(msg, state, text, CITIES[text]["name"], is_new=not has_zodiac_set(msg.from_user.id))
@@ -675,12 +691,15 @@ async def handle_crimea_choice(msg: Message, state: FSMContext):
     text = msg.text.strip() if msg.text else ""
 
     if text == "◀️ Назад к городам":
-        await msg.answer("Выбери город 👇", reply_markup=CITY_KEYBOARD)
+        await msg.answer(
+            "🏙 Выбери город 👇",
+            reply_markup=CITY_KEYBOARD,
+        )
         await state.set_state(UserState.choosing_city)
         return
 
     if text not in CRIMEA_CITIES:
-        await msg.answer("Выбери город Крыма из списка 👇", reply_markup=CRIMEA_KEYBOARD)
+        await msg.answer("🏖 Выбери город Крыма из списка 👇", reply_markup=CRIMEA_KEYBOARD)
         return
 
     await _finalize_city_choice(msg, state, text, CRIMEA_CITIES[text]["name"], is_new=not has_zodiac_set(msg.from_user.id))
@@ -699,17 +718,20 @@ async def _finalize_city_choice(msg: Message, state: FSMContext, city_key: str, 
             intro = f"{city} — отличный выбор!"
 
         await msg.answer(
-            f"Отлично, {city}! 🎉\n\n"
-            f"{intro}\n\n"
-            f"Последний штрих ✨\n\n"
-            f"Укажи свой знак зодиака — каждое утро буду присылать персональный гороскоп 🔮\n\n"
-            f"Если не хочешь — нажми Пропустить.",
+            f"🎉 Отличный выбор — {city_key}!\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🏙 {intro}\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"✨ Последний штрих!\n\n"
+            f"🔮 Укажи свой знак зодиака — каждое утро в 9:00 буду присылать персональный гороскоп на день!\n\n"
+            f"Не хочешь — нажми Пропустить 👇",
             reply_markup=ZODIAC_KEYBOARD,
         )
         await state.set_state(UserState.choosing_zodiac)
     else:
         await msg.answer(
-            f"Город изменён на {city_key} 🎉\n\nЖми кнопку или спрашивай 👇",
+            f"✅ Город изменён на {city_key}!\n\n"
+            f"🗺 Готов искать лучшие места — жми кнопку или пиши 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
@@ -724,8 +746,10 @@ async def handle_zodiac_choice(msg: Message, state: FSMContext):
         await state.clear()
         city, city_key = get_user_city(msg.from_user.id)
         await msg.answer(
-            f"Хорошо! Буду присылать интересные факты о {city} каждое утро ☀️\n\n"
-            f"Жми кнопку или спрашивай 👇",
+            f"👌 Хорошо, без гороскопа!\n\n"
+            f"☀️ Каждое утро в 9:00 буду присылать интересный факт о {city}.\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🗺 Всё готово! Жми кнопку или пиши что ищешь 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
@@ -736,21 +760,29 @@ async def handle_zodiac_choice(msg: Message, state: FSMContext):
         await state.clear()
         city, city_key = get_user_city(msg.from_user.id)
         await msg.answer(
-            f"{text} — отличный выбор! 🔮\n\n"
-            f"Каждое утро в 9:00 тебя будет ждать факт о {city} и персональный гороскоп.\n\n"
-            f"Жми кнопку или спрашивай 👇",
+            f"🔮 {text} — отличный знак!\n\n"
+            f"⭐ Каждое утро в 9:00 тебя будет ждать:\n"
+            f"🏛 Интересный факт о {city}\n"
+            f"✨ Персональный гороскоп на день\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🗺 Всё готово! Жми кнопку или пиши что ищешь 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
         return
 
-    await msg.answer("Выбери знак зодиака из списка или нажми Пропустить 👇", reply_markup=ZODIAC_KEYBOARD)
+    await msg.answer(
+        "🔮 Выбери знак зодиака из списка или нажми Пропустить 👇",
+        reply_markup=ZODIAC_KEYBOARD,
+    )
 
 
 @dp.message(Command("zodiac"))
 async def cmd_zodiac(msg: Message, state: FSMContext):
     await msg.answer(
-        "🔮 Выбери свой знак зодиака — обновлю гороскоп в утренних сообщениях:",
+        "🔮 Смена знака зодиака!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Выбери свой знак — обновлю гороскоп в утренних сообщениях ✨",
         reply_markup=ZODIAC_KEYBOARD,
     )
     await state.set_state(UserState.choosing_zodiac)
@@ -764,9 +796,11 @@ async def cmd_stats(msg: Message):
     cities_text = "\n".join([f"  {city}: {cnt} чел." for city, cnt in top_cities])
     await msg.answer(
         f"📊 Статистика AI Местный\n\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"👥 Всего пользователей: {total}\n"
         f"🟢 Активны сегодня: {active_today}\n"
-        f"💬 Всего запросов: {total_req}\n\n"
+        f"💬 Всего запросов: {total_req}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
         f"🏙 Топ городов:\n{cities_text}",
     )
 
@@ -777,7 +811,11 @@ async def btn_main_menu(msg: Message, state: FSMContext):
     user = msg.from_user
     city, city_key = get_user_city(user.id)
     await msg.answer(
-        f"Главное меню 🏠\n\nТвой город: {city_key}\n\nЧем могу помочь? 👇",
+        f"🏠 Главное меню\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏙 Твой город: {city_key}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"🗺 Что найдём сегодня? Жми кнопку или пиши 👇",
         reply_markup=MAIN_KB,
         disable_web_page_preview=True,
     )
@@ -785,7 +823,12 @@ async def btn_main_menu(msg: Message, state: FSMContext):
 
 @dp.message(F.text == "🏙 Сменить город")
 async def change_city(msg: Message, state: FSMContext):
-    await msg.answer("Выбери новый город 👇", reply_markup=CITY_KEYBOARD)
+    await msg.answer(
+        "🏙 Смена города!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Выбери новый город 👇",
+        reply_markup=CITY_KEYBOARD,
+    )
     await state.set_state(UserState.choosing_city)
 
 
@@ -794,12 +837,22 @@ async def btn_morning_toggle(msg: Message):
     new_status = toggle_morning(msg.from_user.id)
     if new_status:
         await msg.answer(
-            "🔔 Утренние сообщения включены!\n\nКаждый день в 9:00 буду присылать факт о городе и гороскоп ☀️",
+            "🔔 Утренние сообщения включены!\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "☀️ Каждый день в 9:00 тебя будет ждать:\n"
+            "🏛 Интересный факт о твоём городе\n"
+            "🔮 Персональный гороскоп на день\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "✨ Что ещё найдём? Жми или пиши 👇",
             reply_markup=MAIN_KB,
         )
     else:
         await msg.answer(
-            "🔕 Утренние сообщения отключены.\n\nКогда захочешь вернуть — нажми эту кнопку снова.",
+            "🔕 Утренние сообщения отключены\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "Когда захочешь вернуть — нажми кнопку снова 👌\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "✨ Что ещё найдём? Жми или пиши 👇",
             reply_markup=MAIN_KB,
         )
 
@@ -807,12 +860,15 @@ async def btn_morning_toggle(msg: Message):
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
     await msg.answer(
-        "Как пользоваться AI Местным:\n\n"
-        "1. Жми кнопку с темой — получишь подборку мест.\n\n"
-        "2. Или пиши обычным языком — чем больше деталей тем точнее ответ.\n\n"
-        "3. Смени город кнопкой 🏙 Сменить город.\n\n"
-        "4. Каждое утро в 9:00 — факт о городе и гороскоп.\n\n"
-        "5. Скинь фото места — попробую определить что это.\n\n"
+        "🗺 Как пользоваться AI Местным\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🔘 Жми кнопку с темой — получишь подборку мест\n"
+        "✏️ Или пиши обычным языком — чем больше деталей тем точнее ответ\n"
+        "🏙 Смени город кнопкой Сменить город\n"
+        "☀️ Каждое утро в 9:00 — факт о городе и гороскоп\n"
+        "📸 Скинь фото места — попробую определить что это\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "📌 Команды:\n"
         "/zodiac — сменить знак зодиака\n"
         "/start — главное меню\n"
         "/about — о проекте",
@@ -832,16 +888,22 @@ async def btn_about(msg: Message):
 
 async def _send_about(msg: Message):
     await msg.answer(
-        "AI Местный — гид по городам России\n\n"
-        "Показываю города глазами тех кто там живёт:\n"
-        "Места которых нет в топе Google Maps\n"
-        "Кафе куда ходят местные а не туристы\n"
-        "События о которых узнают за день\n"
-        "Маршруты без толпы\n\n"
-        "Города: Сочи, Москва, Санкт-Петербург, Казань, Краснодар, Калининград, "
-        "Екатеринбург, Нижний Новгород, Крым (Ялта, Севастополь, Симферополь, Евпатория, Керчь).\n\n"
-        "Замечания и идеи — жми Поддержка.\n\n"
-        f"Тестовая версия.{BACK_TEXT}",
+        "🗺 AI Местный — твой городской гид\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🏘 Показываю города глазами тех, кто там живёт:\n\n"
+        "📍 Места которых нет в топе Google Maps\n"
+        "🍽 Кафе куда ходят местные, а не туристы\n"
+        "🎭 События о которых узнают за день\n"
+        "🗺 Маршруты без толпы\n"
+        "📸 Определяю места по фото\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "🏙 Города:\n"
+        "🌊 Сочи • 🏙 Москва • 🏛 Петербург • 🕌 Казань\n"
+        "🌿 Краснодар • 🌅 Калининград • 💎 Екатеринбург\n"
+        "🏯 Нижний Новгород • 🏖 Крым\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "💡 Замечания и идеи — жми Поддержка\n\n"
+        f"✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
         disable_web_page_preview=True,
     )
@@ -852,7 +914,12 @@ async def btn_support(msg: Message):
     user  = msg.from_user
     city, _ = get_user_city(user.id)
     await msg.answer(
-        f"Напиши замечание или идею — передам создателю.\n\nИли пиши напрямую: @demo23rus{BACK_TEXT}",
+        "🛠 Поддержка\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "💬 Напиши замечание или идею — читаю всё!\n\n"
+        "📩 Или пиши напрямую создателю: @demo23rus\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
     )
 
@@ -861,7 +928,10 @@ async def btn_support(msg: Message):
 async def btn_own(msg: Message):
     city, _ = get_user_city(msg.from_user.id)
     await msg.answer(
-        f"Пиши любой вопрос про {city} — отвечу 🚀",
+        f"✏️ Свой вопрос\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🗺 Пиши любой вопрос про {city}!\n"
+        f"Чем больше деталей — тем точнее ответ 🚀",
         reply_markup=MAIN_KB,
     )
 
@@ -869,8 +939,13 @@ async def btn_own(msg: Message):
 @dp.message(F.text == "💬 Оставить отзыв")
 async def btn_review(msg: Message, state: FSMContext):
     await msg.answer(
-        "💬 Напиши свой отзыв или пожелание — читаю всё и учитываю при развитии бота.\n\n"
-        "Что понравилось? Что можно улучшить? Чего не хватает?",
+        "💬 Оставить отзыв\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🙏 Напиши свой отзыв или пожелание — читаю всё и учитываю!\n\n"
+        "💡 Что понравилось?\n"
+        "🔧 Что можно улучшить?\n"
+        "✨ Чего не хватает?\n"
+        "━━━━━━━━━━━━━━━",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="❌ Отмена")]],
             resize_keyboard=True,
@@ -884,13 +959,20 @@ async def handle_review(msg: Message, state: FSMContext):
     text = msg.text.strip() if msg.text else ""
     if text == "❌ Отмена":
         await state.clear()
-        await msg.answer("Хорошо, в другой раз 👌", reply_markup=MAIN_KB)
+        await msg.answer(
+            "👌 Хорошо, в другой раз!\n\n✨ Что ещё найдём? Жми или пиши 👇",
+            reply_markup=MAIN_KB,
+        )
         return
     user    = msg.from_user
     city, _ = get_user_city(user.id)
     await state.clear()
     await msg.answer(
-        "Спасибо за отзыв! 🙏 Это очень помогает делать бота лучше." + BACK_TEXT,
+        "🙏 Спасибо за отзыв!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "💪 Это очень помогает делать бота лучше!\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
     )
     asyncio.create_task(log_review(user.id, full_name(user), user.username, city, text))
@@ -902,7 +984,11 @@ async def handle_photo(msg: Message, state: FSMContext):
     await state.update_data(photo_file_id=msg.photo[-1].file_id)
     await state.set_state(UserState.waiting_photo_action)
     await msg.answer(
-        "Вижу фото! 📸 Что хочешь сделать?",
+        "📸 Вижу фото!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🔍 Хочешь узнать что это за место?\n"
+        "Или расскажи сам что ищешь 👇\n"
+        "━━━━━━━━━━━━━━━",
         reply_markup=PHOTO_KB,
     )
 
@@ -914,7 +1000,10 @@ async def handle_identify_place(msg: Message, state: FSMContext):
     await state.clear()
 
     city, _ = get_user_city(msg.from_user.id)
-    thinking = await msg.answer("🔍 Анализирую фото... подожди немного 🤔", reply_markup=MAIN_KB)
+    thinking = await msg.answer(
+        "🔍 Анализирую фото...\n⏳ Подожди немного 🤔",
+        reply_markup=MAIN_KB,
+    )
 
     try:
         # Скачиваем фото
@@ -935,7 +1024,12 @@ async def handle_identify_place(msg: Message, state: FSMContext):
             pass
 
         await msg.answer(
-            f"{result}\n\n⚠️ Это предположение на основе фото — проверь по ссылкам на карты.{BACK_TEXT}",
+            f"📍 Вот что удалось найти:\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{result}\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"⚠️ Это предположение на основе фото — проверь по ссылкам на карты.\n\n"
+            f"✨ Что ещё найдём? Жми или пиши 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
@@ -950,7 +1044,9 @@ async def handle_identify_place(msg: Message, state: FSMContext):
         except Exception:
             pass
         await msg.answer(
-            f"Не смог обработать фото. Попробуй написать название места текстом 👇{BACK_TEXT}",
+            "😔 Не смог обработать фото.\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "✏️ Попробуй написать название места текстом 👇",
             reply_markup=MAIN_KB,
         )
     finally:
@@ -963,7 +1059,9 @@ async def handle_photo_write_self(msg: Message, state: FSMContext):
     await state.clear()
     city, _ = get_user_city(msg.from_user.id)
     await msg.answer(
-        f"Пиши что ищешь в {city} — найду лучшее 🚀",
+        f"✏️ Отлично!\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🗺 Пиши что ищешь в {city} — найду лучшее 🚀",
         reply_markup=MAIN_KB,
     )
 
@@ -978,7 +1076,9 @@ async def handle_photo_action_other(msg: Message, state: FSMContext):
 async def handle_video(msg: Message):
     city, _ = get_user_city(msg.from_user.id)
     await msg.answer(
-        f"Видео пока не поддерживаю 😊\n\nНо если хочешь найти что-то в {city} — просто напиши что ищешь или жми кнопку 👇",
+        f"🎥 Видео пока не поддерживаю!\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✏️ Напиши что ищешь в {city} — найду лучшее 🗺",
         reply_markup=MAIN_KB,
     )
 
@@ -986,7 +1086,10 @@ async def handle_video(msg: Message):
 @dp.message(F.sticker)
 async def handle_sticker(msg: Message):
     await msg.answer(
-        "Классный стикер! 😄 Но я понимаю только текст, голосовые и фото.\n\nЧто ищешь? Жми кнопку или пиши 👇",
+        "😄 Классный стикер!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📝 Я понимаю текст, голосовые и фото.\n"
+        "Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
 
@@ -994,7 +1097,9 @@ async def handle_sticker(msg: Message):
 @dp.message(F.document)
 async def handle_document(msg: Message):
     await msg.answer(
-        "Документы пока не поддерживаю 😊\n\nЕсли ищешь место — напиши что именно или жми кнопку 👇",
+        "📄 Документы пока не поддерживаю!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "✏️ Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
 
@@ -1020,7 +1125,10 @@ async def handle_voice(msg: Message):
 
         # Антифлуд для голосовых
         if is_flood(msg.from_user.id):
-            await msg.answer(f"Подожди секунду — обрабатываю предыдущий запрос 😊", reply_markup=MAIN_KB)
+            await msg.answer(
+                "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
+                reply_markup=MAIN_KB,
+            )
             return
 
         city, _ = get_user_city(msg.from_user.id)
@@ -1065,7 +1173,7 @@ async def handle_text(msg: Message, state: FSMContext):
     # Антифлуд
     if is_flood(user.id):
         await msg.answer(
-            "Подожди секунду — обрабатываю предыдущий запрос 😊",
+            "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
             reply_markup=MAIN_KB,
         )
         return
@@ -1096,7 +1204,10 @@ async def handle_text(msg: Message, state: FSMContext):
 @dp.message()
 async def fallback(msg: Message):
     await msg.answer(
-        "Я понимаю текст, голосовые сообщения и фото.\n\nНапиши что ищешь или жми кнопку 👇",
+        "🤔 Не совсем понял!\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📝 Я понимаю текст, голосовые и фото.\n"
+        "Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
 
