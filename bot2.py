@@ -9,6 +9,8 @@ Service: sochi-test
 import asyncio
 import logging
 import os
+import sys
+import fcntl
 import sqlite3
 import tempfile
 import time
@@ -18,7 +20,7 @@ import pytz
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -53,6 +55,7 @@ CITIES = {
     "🌅 Калининград":     {"name": "Калининград"},
     "💎 Екатеринбург":    {"name": "Екатеринбург"},
     "🏯 Нижний Новгород": {"name": "Нижний Новгород"},
+    "⛵ Геленджик":       {"name": "Геленджик"},
 }
 
 # Города Крыма как отдельный словарь
@@ -77,6 +80,7 @@ CITY_EVENTS = {
     "Калининград":     ("https://kudago.com/klg/", "https://afisha.yandex.ru/kaliningrad"),
     "Екатеринбург":    ("https://kudago.com/ekb/", "https://afisha.yandex.ru/yekaterinburg"),
     "Нижний Новгород": ("https://kudago.com/nnv/", "https://afisha.yandex.ru/nizhny-novgorod"),
+    "Геленджик":       ("https://kudago.com/", "https://afisha.yandex.ru/gelendgik"),
     "Ялта":            ("https://kudago.com/", "https://afisha.yandex.ru/yalta"),
     "Севастополь":     ("https://kudago.com/", "https://afisha.yandex.ru/sevastopol"),
     "Симферополь":     ("https://kudago.com/", "https://afisha.yandex.ru/simferopol"),
@@ -113,7 +117,7 @@ CITY_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🏛 Санкт-Петербург"), KeyboardButton(text="🕌 Казань")],
         [KeyboardButton(text="🌿 Краснодар"),       KeyboardButton(text="🌅 Калининград")],
         [KeyboardButton(text="💎 Екатеринбург"),    KeyboardButton(text="🏯 Нижний Новгород")],
-        [KeyboardButton(text="🏖 Крым")],
+        [KeyboardButton(text="⛵ Геленджик"),       KeyboardButton(text="🏖 Крым")],
     ],
     resize_keyboard=True,
 )
@@ -241,6 +245,7 @@ def init_db():
 
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # доступ к колонкам по имени, а не по номеру — устойчиво к миграциям
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -308,27 +313,27 @@ def get_all_users_for_morning():
 def get_user_city(user_id):
     row = get_user(user_id)
     if row:
-        return row[3], row[4]
+        return row["city"], row["city_emoji"]
     return "Сочи", "🌊 Сочи"
 
 def get_user_zodiac(user_id):
     row = get_user(user_id)
-    if row and len(row) > 5:
-        return row[5]
+    if row is not None and "zodiac" in row.keys():
+        return row["zodiac"]
     return None
 
 def get_morning_status(user_id) -> bool:
     row = get_user(user_id)
-    if row and len(row) > 10:
-        return bool(row[10])
+    if row is not None and "morning_notify" in row.keys():
+        return bool(row["morning_notify"])
     return True
 
 def has_zodiac_set(user_id):
     """True если зодиак уже выбирали (включая 'skip')"""
     row = get_user(user_id)
-    if not row or len(row) <= 5:
+    if row is None or "zodiac" not in row.keys():
         return False
-    zodiac = row[5]
+    zodiac = row["zodiac"]
     # Зодиак задан если значение не NULL и не пустая строка
     return zodiac is not None and zodiac != ""
 
@@ -356,6 +361,11 @@ def is_flood(user_id: int) -> bool:
     if now - last < FLOOD_SECONDS:
         return True
     last_request_time[user_id] = now
+    # Периодическая очистка старых записей, чтобы словарь не рос бесконечно
+    if len(last_request_time) > 1000:
+        cutoff = now - 3600
+        for uid in [u for u, t in last_request_time.items() if t < cutoff]:
+            last_request_time.pop(uid, None)
     return False
 
 # ──────────────────────────────────────────────────────────────
@@ -631,9 +641,9 @@ async def cmd_start(msg: Message, state: FSMContext):
         except ValueError:
             ref_by = None
 
-    if existing and existing[3]:
-        city     = existing[3]
-        city_key = existing[4]
+    if existing and existing["city"]:
+        city     = existing["city"]
+        city_key = existing["city_emoji"]
         save_user(user.id, name, user.username, city, city_key)
         await msg.answer(
             f"👋 Привет, {user.first_name or 'друг'}! Рад видеть тебя снова!\n\n"
@@ -900,10 +910,10 @@ async def _send_about(msg: Message):
         "🏙 Города:\n"
         "🌊 Сочи • 🏙 Москва • 🏛 Петербург • 🕌 Казань\n"
         "🌿 Краснодар • 🌅 Калининград • 💎 Екатеринбург\n"
-        "🏯 Нижний Новгород • 🏖 Крым\n\n"
+        "🏯 Нижний Новгород • ⛵ Геленджик • 🏖 Крым\n\n"
         "━━━━━━━━━━━━━━━\n"
         "💡 Замечания и идеи — жми Поддержка\n\n"
-        f"✨ Что ещё найдём? Жми или пиши 👇",
+        "✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
         disable_web_page_preview=True,
     )
@@ -919,7 +929,7 @@ async def btn_support(msg: Message):
         "💬 Напиши замечание или идею — читаю всё!\n\n"
         "📩 Или пиши напрямую создателю: @demo23rus\n"
         "━━━━━━━━━━━━━━━\n\n"
-        f"✨ Что ещё найдём? Жми или пиши 👇",
+        "✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
     )
 
@@ -1107,6 +1117,14 @@ async def handle_document(msg: Message):
 # ── Голосовые ─────────────────────────────────────────────────
 @dp.message(F.voice)
 async def handle_voice(msg: Message):
+    # Антифлуд проверяем ПЕРВЫМ — чтобы не тратить деньги на Whisper при спаме
+    if is_flood(msg.from_user.id):
+        await msg.answer(
+            "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
+            reply_markup=MAIN_KB,
+        )
+        return
+
     await msg.answer("🎤 Распознаю голосовое... подожди немного 😊")
     tmp_path = None
     try:
@@ -1121,14 +1139,6 @@ async def handle_voice(msg: Message):
         text = transcript.text.strip()
         if not text:
             await msg.answer(f"Не смог распознать. Попробуй написать текстом 👇{BACK_TEXT}", reply_markup=MAIN_KB)
-            return
-
-        # Антифлуд для голосовых
-        if is_flood(msg.from_user.id):
-            await msg.answer(
-                "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
-                reply_markup=MAIN_KB,
-            )
             return
 
         city, _ = get_user_city(msg.from_user.id)
@@ -1213,14 +1223,40 @@ async def fallback(msg: Message):
 
 
 # ──────────────────────────────────────────────────────────────
+# ЗАЩИТА ОТ ВТОРОГО ЭКЗЕМПЛЯРА
+# ──────────────────────────────────────────────────────────────
+_lock_handle = None
+
+def acquire_single_instance_lock():
+    """
+    Не даёт запустить второй экземпляр бота на ЭТОМ сервере.
+    Если бот уже работает здесь — новый процесс сразу завершится,
+    и утренняя рассылка не задвоится.
+    ВНИМАНИЕ: это НЕ защищает от запуска на ДРУГОМ сервере (там свой /tmp).
+    Если дубль из-за двух серверов — нужно остановить бота на старом сервере.
+    """
+    global _lock_handle
+    _lock_handle = open("/tmp/mestniy_bot.lock", "w")
+    try:
+        fcntl.flock(_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        logging.error("❌ Бот уже запущен в другом процессе на этом сервере. Завершаюсь.")
+        sys.exit(1)
+    _lock_handle.write(str(os.getpid()))
+    _lock_handle.flush()
+
+
+# ──────────────────────────────────────────────────────────────
 # ЗАПУСК
 # ──────────────────────────────────────────────────────────────
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    acquire_single_instance_lock()  # гарантия: один экземпляр на сервер
     init_db()
     logging.info("AI Местный v5 запущен")
     asyncio.create_task(morning_scheduler())
-    await dp.start_polling(bot)
+    # drop_pending_updates — не отвечать на сообщения, накопившиеся пока бот был выключен
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

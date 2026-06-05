@@ -8,9 +8,11 @@ Service: sochi-channel.timer (systemd)
 
 import asyncio
 import logging
+import fcntl
 import random
 import json
 import urllib.request
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -252,6 +254,15 @@ def extract_topic(post_text: str) -> str:
 async def post_to_channel():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+    # Защита от двойного запуска на ЭТОМ сервере (если таймер/cron сработают дважды).
+    # ВНИМАНИЕ: не спасает от запуска на ДРУГОМ сервере или от Make.com — там источник свой.
+    lock_handle = open("/tmp/sochi_channel.lock", "w")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        logging.error("Скрипт уже выполняется в другом процессе. Завершаюсь, чтобы не задвоить пост.")
+        return
+
     now = datetime.now(MOSCOW_TZ)
     logging.info(f"Запуск. Дата: {now.strftime('%d.%m.%Y %H:%M')}")
 
@@ -304,5 +315,4 @@ async def post_to_channel():
 
 
 if __name__ == "__main__":
-    import urllib.parse
     asyncio.run(post_to_channel())
