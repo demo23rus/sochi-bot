@@ -28,6 +28,7 @@ import tempfile
 import time
 import base64
 import uuid
+import html
 import urllib.parse
 from datetime import datetime
 
@@ -434,18 +435,20 @@ def clear_context(user_id: int):
 # ССЫЛКИ НА КАРТЫ — программное построение
 # ──────────────────────────────────────────────────────────────
 def make_map_links(place_name: str, city: str) -> str:
-    """Формирует поисковые ссылки на Яндекс.Карты и 2ГИС."""
-    query = urllib.parse.quote(f"{place_name} {city}")
+    """Формирует компактные HTML-ссылки на Яндекс.Карты и 2ГИС."""
+    query  = urllib.parse.quote(f"{place_name} {city}")
     yandex = f"https://yandex.ru/maps/?text={query}"
     gis    = f"https://2gis.ru/search/{query}"
-    return f"🗺 Яндекс.Карты: {yandex}\n🗺 2ГИС: {gis}"
+    return f'🗺 <a href="{yandex}">Яндекс.Карты</a>  ·  <a href="{gis}">2ГИС</a>'
 
 # ──────────────────────────────────────────────────────────────
 # РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 # ──────────────────────────────────────────────────────────────
 async def send_long(msg: Message, text: str, **kwargs):
-    """Отправляет текст, разбивая на части если превышает лимит Telegram.
-    Уровни разбиения: по \n\n → по \n → по символам."""
+    """Отправляет текст с parse_mode=HTML, разбивая на части если превышает лимит."""
+    # Всегда используем HTML — ссылки на карты оформлены как <a href>
+    kwargs.setdefault("parse_mode", "HTML")
+    kwargs.setdefault("disable_web_page_preview", True)
     if len(text) <= MAX_MSG_LEN:
         await msg.answer(text, **kwargs)
         return
@@ -785,34 +788,36 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
 
     if resp_type == "places":
         places = data.get("places", [])
-        # Валидация: пустой список — это ошибка
         if not places:
             logging.warning("GPT вернул пустой список places")
             return "Не нашёл конкретных мест по этому запросу. Попробуй уточнить или задай вопрос иначе 👇", [], "error"
 
         parts = []
         if data.get("intro"):
-            parts.append(data["intro"])
+            parts.append(html.escape(str(data["intro"])))
             parts.append("")
         for i, p in enumerate(places, 1):
-            name = p.get("name", "").strip()
+            name = html.escape(str(p.get("name", "")).strip())
             if not name:
                 continue
-            place_names.append(name)
-            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(p.get("price", ""), "💛")
+            place_names.append(p.get("name", "").strip())
+            area  = html.escape(str(p.get("area", "")))
+            price_raw = str(p.get("price", ""))
+            price = html.escape(price_raw)
+            desc  = html.escape(str(p.get("description", "")))
+            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(price_raw, "💛")
             block = (
                 f"{i}. {name}\n"
-                f"📍 {p.get('area', '')}\n"
-                f"{price_emoji} {p.get('price', '')}\n"
-                f"✨ {p.get('description', '')}\n"
-                f"{make_map_links(name, city)}\n"
+                f"📍 {area}\n"
+                f"{price_emoji} {price}\n"
+                f"✨ {desc}\n"
+                f"{make_map_links(p.get('name', '').strip(), city)}\n"
                 f"⚠️ Цены и часы — уточняйте перед визитом"
             )
             parts.append(block)
         if data.get("outro"):
             parts.append("")
-            parts.append(data["outro"])
-        # Финальная проверка: все имена могли оказаться пустыми
+            parts.append(html.escape(str(data["outro"])))
         if not place_names:
             return "Не удалось получить конкретные места. Попробуй уточнить запрос 👇", [], "error"
         return "\n\n".join(parts), place_names, resp_type
@@ -823,43 +828,53 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
             logging.warning("GPT вернул пустой маршрут")
             return "Не удалось составить маршрут. Попробуй ещё раз 👇", [], "error"
 
-        parts = [f"🗺 {data.get('title', 'Маршрут на день')}"]
+        title = html.escape(str(data.get("title", "Маршрут на день")))
+        parts = [f"🗺 {title}"]
         for slot in slots:
-            name = slot.get("name", "").strip()
+            name = html.escape(str(slot.get("name", "")).strip())
             if not name:
                 continue
-            place_names.append(name)
-            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(slot.get("price", ""), "💛")
+            place_names.append(slot.get("name", "").strip())
+            area     = html.escape(str(slot.get("area", "")))
+            price_raw = str(slot.get("price", ""))
+            price    = html.escape(price_raw)
+            desc     = html.escape(str(slot.get("description", "")))
+            time_str = html.escape(str(slot.get("time", "")))
+            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(price_raw, "💛")
             block = (
                 f"━━━━━━━━━━━━━━━\n"
-                f"🕐 {slot.get('time', '')} — {name}\n"
-                f"📍 {slot.get('area', '')}\n"
-                f"{price_emoji} {slot.get('price', '')}\n"
-                f"{slot.get('description', '')}\n"
-                f"{make_map_links(name, city)}"
+                f"🕐 {time_str} — {name}\n"
+                f"📍 {area}\n"
+                f"{price_emoji} {price}\n"
+                f"{desc}\n"
+                f"{make_map_links(slot.get('name', '').strip(), city)}"
             )
             parts.append(block)
         parts.append("━━━━━━━━━━━━━━━")
         if data.get("warning"):
-            parts.append(f"⚠️ {data['warning']}")
-        # Финальная проверка маршрута
+            parts.append(f"⚠️ {html.escape(str(data['warning']))}")
         if not place_names:
             return "Не удалось составить маршрут — места оказались пустыми. Попробуй ещё раз 👇", [], "error"
         return "\n\n".join(parts), place_names, resp_type
 
     elif resp_type == "single":
-        name = data.get("name", "").strip()
+        name = html.escape(str(data.get("name", "")).strip())
         if not name:
             return "Не удалось найти место. Попробуй уточнить запрос 👇", [], "error"
-        place_names.append(name)
-        price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(data.get("price", ""), "💛")
+        place_names.append(data.get("name", "").strip())
+        area      = html.escape(str(data.get("area", "")))
+        price_raw = str(data.get("price", ""))
+        price     = html.escape(price_raw)
+        desc      = html.escape(str(data.get("description", "")))
+        tip       = html.escape(str(data.get("tip", "")))
+        price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(price_raw, "💛")
         text = (
             f"💎 {name}\n\n"
-            f"📍 {data.get('area', '')}\n"
-            f"{price_emoji} {data.get('price', '')}\n\n"
-            f"{data.get('description', '')}\n\n"
-            f"💡 {data.get('tip', '')}\n\n"
-            f"{make_map_links(name, city)}\n"
+            f"📍 {area}\n"
+            f"{price_emoji} {price}\n\n"
+            f"{desc}\n\n"
+            f"💡 {tip}\n\n"
+            f"{make_map_links(data.get('name', '').strip(), city)}\n"
             f"⚠️ Цены и часы — уточняйте перед визитом"
         )
         return text, place_names, resp_type
@@ -868,7 +883,7 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
         text_content = data.get("text", "")
         if not text_content:
             return "Не получил ответ. Попробуй переформулировать вопрос 👇", [], "error"
-        return text_content, [], "text"
+        return html.escape(str(text_content)), [], "text"
 
 # ──────────────────────────────────────────────────────────────
 # GPT — ОТЕЛИ (JSON)
