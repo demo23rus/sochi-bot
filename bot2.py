@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-AI Местный — мультигород v5.1
+AI Местный — гид по городам России v6.0
 Bot: @mestniy_guide_bot
 File: /root/bot2.py
 Service: sochi-test
+
+Что нового в v6.0:
+- Свободный ввод любого города России текстом
+- GPT отвечает JSON → Python строит ссылки программно
+- Контекст диалога (последние 4 сообщения на пользователя)
+- Одноимённые города — уточнение региона
+- Регионы и курорты (Красная Поляна, Домбай и т.д.)
+- Inline-реакции 👍/👎 с причинами → SQLite + Google Sheets
+- Разбивка длинных сообщений
+- «Другой маршрут» исключает предыдущие места
+- Честные формулировки в «О проекте»
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -15,12 +27,16 @@ import sqlite3
 import tempfile
 import time
 import base64
-from datetime import datetime, timedelta
-import pytz
+import uuid
+import urllib.parse
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -36,129 +52,108 @@ OPENAI_KEY     = "sk-mfvVI3QN2uQvXPlhMkAeUUzmbjK5aQzj"
 OWNER_ID       = 549639607
 SPREADSHEET_ID = "1PE7CaFuWOe_eygQqIoMAmUdJBtATbIaNfZR4cvarPCA"
 SHEET_NAME     = "Аналитика Сочи"
-REVIEW_SHEET   = "Отзывы AI местный"
 CREDENTIALS    = "/root/google_credentials.json"
 DB_PATH        = "/root/bot2.db"
 MODEL          = "gpt-4o"
-MOSCOW_TZ      = pytz.timezone("Europe/Moscow")
-FLOOD_SECONDS  = 4  # минимум секунд между запросами
+FLOOD_SECONDS  = 4
+MAX_MSG_LEN    = 4000   # лимит Telegram 4096, берём с запасом
+CONTEXT_TURNS  = 4      # сколько пар сообщений хранить в контексте
 
 # ──────────────────────────────────────────────────────────────
-# ГОРОДА
+# АФИШИ (для популярных городов)
 # ──────────────────────────────────────────────────────────────
-CITIES = {
-    "🌊 Сочи":            {"name": "Сочи"},
-    "🏙 Москва":          {"name": "Москва"},
-    "🏛 Санкт-Петербург": {"name": "Санкт-Петербург"},
-    "🕌 Казань":          {"name": "Казань"},
-    "🌿 Краснодар":       {"name": "Краснодар"},
-    "🌅 Калининград":     {"name": "Калининград"},
-    "💎 Екатеринбург":    {"name": "Екатеринбург"},
-    "🏯 Нижний Новгород": {"name": "Нижний Новгород"},
-    "⛵ Геленджик":       {"name": "Геленджик"},
-}
-
-# Города Крыма как отдельный словарь
-CRIMEA_CITIES = {
-    "🌺 Ялта":          {"name": "Ялта"},
-    "⚓ Севастополь":   {"name": "Севастополь"},
-    "🏛 Симферополь":   {"name": "Симферополь"},
-    "🏖 Евпатория":     {"name": "Евпатория"},
-    "🗼 Керчь":         {"name": "Керчь"},
-}
-
-# Все допустимые кнопки городов (основные + крым)
-ALL_CITY_BUTTONS = set(CITIES.keys()) | set(CRIMEA_CITIES.keys()) | {"🏖 Крым"}
-
-# Ссылки "Куда сходить" по городам
 CITY_EVENTS = {
-    "Сочи":            ("https://kudago.com/sochi/", "https://afisha.yandex.ru/sochi"),
-    "Москва":          ("https://kudago.com/msk/", "https://afisha.yandex.ru/moscow"),
-    "Санкт-Петербург": ("https://kudago.com/spb/", "https://afisha.yandex.ru/saint-petersburg"),
-    "Казань":          ("https://kudago.com/kzn/", "https://afisha.yandex.ru/kazan"),
-    "Краснодар":       ("https://kudago.com/krd/", "https://afisha.yandex.ru/krasnodar"),
-    "Калининград":     ("https://kudago.com/klg/", "https://afisha.yandex.ru/kaliningrad"),
-    "Екатеринбург":    ("https://kudago.com/ekb/", "https://afisha.yandex.ru/yekaterinburg"),
-    "Нижний Новгород": ("https://kudago.com/nnv/", "https://afisha.yandex.ru/nizhny-novgorod"),
-    "Геленджик":       ("https://kudago.com/", "https://afisha.yandex.ru/gelendgik"),
-    "Ялта":            ("https://kudago.com/", "https://afisha.yandex.ru/yalta"),
-    "Севастополь":     ("https://kudago.com/", "https://afisha.yandex.ru/sevastopol"),
-    "Симферополь":     ("https://kudago.com/", "https://afisha.yandex.ru/simferopol"),
-    "Евпатория":       ("https://kudago.com/", "https://afisha.yandex.ru/evpatoria"),
-    "Керчь":           ("https://kudago.com/", "https://afisha.yandex.ru/kerch"),
+    "Сочи":            ("https://kudago.com/sochi/",        "https://afisha.yandex.ru/sochi"),
+    "Москва":          ("https://kudago.com/msk/",          "https://afisha.yandex.ru/moscow"),
+    "Санкт-Петербург": ("https://kudago.com/spb/",          "https://afisha.yandex.ru/saint-petersburg"),
+    "Казань":          ("https://kudago.com/kzn/",          "https://afisha.yandex.ru/kazan"),
+    "Краснодар":       ("https://kudago.com/krd/",          "https://afisha.yandex.ru/krasnodar"),
+    "Калининград":     ("https://kudago.com/klg/",          "https://afisha.yandex.ru/kaliningrad"),
+    "Екатеринбург":    ("https://kudago.com/ekb/",          "https://afisha.yandex.ru/yekaterinburg"),
+    "Нижний Новгород": ("https://kudago.com/nnv/",          "https://afisha.yandex.ru/nizhny-novgorod"),
+    "Новосибирск":     ("https://kudago.com/nsk/",          "https://afisha.yandex.ru/novosibirsk"),
+    "Самара":          ("https://kudago.com/sam/",          "https://afisha.yandex.ru/samara"),
+    "Уфа":             ("https://kudago.com/ufa/",          "https://afisha.yandex.ru/ufa"),
+    "Ростов-на-Дону":  ("https://kudago.com/rostov/",       "https://afisha.yandex.ru/rostov-on-don"),
+    "Воронеж":         ("https://kudago.com/vrn/",          "https://afisha.yandex.ru/voronezh"),
+    "Пермь":           ("https://kudago.com/perm/",         "https://afisha.yandex.ru/perm"),
+    "Красноярск":      ("https://kudago.com/krsk/",         "https://afisha.yandex.ru/krasnoyarsk"),
+    "Владивосток":     ("https://kudago.com/vladivostok/",  "https://afisha.yandex.ru/vladivostok"),
+    "Геленджик":       ("https://kudago.com/",              "https://afisha.yandex.ru/gelendgik"),
+    "Ялта":            ("https://kudago.com/",              "https://afisha.yandex.ru/yalta"),
+    "Севастополь":     ("https://kudago.com/",              "https://afisha.yandex.ru/sevastopol"),
+    "Симферополь":     ("https://kudago.com/",              "https://afisha.yandex.ru/simferopol"),
+    "Евпатория":       ("https://kudago.com/",              "https://afisha.yandex.ru/evpatoria"),
+    "Керчь":           ("https://kudago.com/",              "https://afisha.yandex.ru/kerch"),
+    "Анапа":           ("https://kudago.com/",              "https://afisha.yandex.ru/anapa"),
+    "Новороссийск":    ("https://kudago.com/",              "https://afisha.yandex.ru/novorossiysk"),
 }
 
-# Короткие фразы — отвечаем без GPT
+# ──────────────────────────────────────────────────────────────
+# КОРОТКИЕ ФРАЗЫ — без GPT
+# ──────────────────────────────────────────────────────────────
 SHORT_REPLIES = {
-    "привет": "Привет! 👋 Жми кнопку или пиши что ищешь — найду лучшее 😊",
-    "хай": "Привет! 👋 Жми кнопку или пиши что ищешь — найду лучшее 😊",
-    "hello": "Привет! 👋 Жми кнопку или пиши что ищешь — найду лучшее 😊",
-    "спасибо": "Пожалуйста! 🙏 Если нужно ещё что-то — пиши 😊",
-    "спс": "Пожалуйста! 🙏 Если нужно ещё что-то — пиши 😊",
+    "привет":    "Привет! 👋 Жми кнопку или пиши что ищешь 😊",
+    "хай":       "Привет! 👋 Жми кнопку или пиши что ищешь 😊",
+    "hello":     "Привет! 👋 Жми кнопку или пиши что ищешь 😊",
+    "спасибо":   "Пожалуйста! 🙏 Если нужно ещё что-то — пиши 😊",
+    "спс":       "Пожалуйста! 🙏 Если нужно ещё что-то — пиши 😊",
     "благодарю": "Пожалуйста! 🙏 Если нужно ещё что-то — пиши 😊",
-    "ок": "Отлично! 👌 Пиши если что-то нужно 😊",
-    "окей": "Отлично! 👌 Пиши если что-то нужно 😊",
-    "ok": "Отлично! 👌 Пиши если что-то нужно 😊",
-    "👍": "😊 Всегда рад помочь! Пиши если нужно.",
-    "👌": "😊 Всегда рад помочь! Пиши если нужно.",
-    "отлично": "Рад помочь! 😊 Что-нибудь ещё найти?",
-    "класс": "Рад помочь! 😊 Что-нибудь ещё найти?",
-    "супер": "Рад помочь! 😊 Что-нибудь ещё найти?",
-    "хорошо": "Отлично! 👌 Пиши если что-то нужно 😊",
-    "понял": "Отлично! 👌 Пиши если что-то нужно 😊",
+    "ок":        "Отлично! 👌 Пиши если что-то нужно 😊",
+    "окей":      "Отлично! 👌 Пиши если что-то нужно 😊",
+    "ok":        "Отлично! 👌 Пиши если что-то нужно 😊",
+    "👍":        "😊 Всегда рад помочь!",
+    "👌":        "😊 Всегда рад помочь!",
+    "отлично":   "Рад помочь! 😊",
+    "класс":     "Рад помочь! 😊",
+    "супер":     "Рад помочь! 😊",
+    "хорошо":    "Отлично! 👌 Пиши если что-то нужно 😊",
+    "понял":     "Отлично! 👌 Пиши если что-то нужно 😊",
 }
 
 # ──────────────────────────────────────────────────────────────
 # КЛАВИАТУРЫ
 # ──────────────────────────────────────────────────────────────
-CITY_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🌊 Сочи"),            KeyboardButton(text="🏙 Москва")],
-        [KeyboardButton(text="🏛 Санкт-Петербург"), KeyboardButton(text="🕌 Казань")],
-        [KeyboardButton(text="🌿 Краснодар"),       KeyboardButton(text="🌅 Калининград")],
-        [KeyboardButton(text="💎 Екатеринбург"),    KeyboardButton(text="🏯 Нижний Новгород")],
-        [KeyboardButton(text="⛵ Геленджик"),       KeyboardButton(text="🏖 Крым")],
-    ],
-    resize_keyboard=True,
-)
-
-CRIMEA_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🌺 Ялта"),        KeyboardButton(text="⚓ Севастополь")],
-        [KeyboardButton(text="🏛 Симферополь"), KeyboardButton(text="🏖 Евпатория")],
-        [KeyboardButton(text="🗼 Керчь")],
-        [KeyboardButton(text="◀️ Назад к городам")],
-    ],
-    resize_keyboard=True,
-)
-
-ZODIAC_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="♈ Овен"),      KeyboardButton(text="♉ Телец")],
-        [KeyboardButton(text="♊ Близнецы"),  KeyboardButton(text="♋ Рак")],
-        [KeyboardButton(text="♌ Лев"),       KeyboardButton(text="♍ Дева")],
-        [KeyboardButton(text="♎ Весы"),      KeyboardButton(text="♏ Скорпион")],
-        [KeyboardButton(text="♐ Стрелец"),   KeyboardButton(text="♑ Козерог")],
-        [KeyboardButton(text="♒ Водолей"),   KeyboardButton(text="♓ Рыбы")],
-        [KeyboardButton(text="⏭ Пропустить")],
-    ],
-    resize_keyboard=True,
-)
-
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✏️ Свой вопрос"),      KeyboardButton(text="🏙 Сменить город")],
-        [KeyboardButton(text="🍽 Где поесть"),        KeyboardButton(text="☕ Кофе с видом")],
-        [KeyboardButton(text="🌅 На рассвет"),        KeyboardButton(text="🎭 Куда сходить")],
-        [KeyboardButton(text="👨‍👩‍👧 С детьми"),       KeyboardButton(text="💑 Романтика")],
-        [KeyboardButton(text="🏔 На природу"),        KeyboardButton(text="🌃 Вечер")],
-        [KeyboardButton(text="🗺 Маршрут на день"),   KeyboardButton(text="💬 Местный советует")],
-        [KeyboardButton(text="🛠 Поддержка"),         KeyboardButton(text="ℹ️ О проекте")],
-        [KeyboardButton(text="💬 Оставить отзыв"),    KeyboardButton(text="🔔 Утренние сообщения")],
+        [KeyboardButton(text="🗺 Маршрут на день"),  KeyboardButton(text="✏️ Свой вопрос")],
+        [KeyboardButton(text="🍽 Где поесть"),        KeyboardButton(text="🏨 Где остановиться")],
+        [KeyboardButton(text="🎭 Куда сходить"),      KeyboardButton(text="➕ Ещё")],
+        [KeyboardButton(text="🏙 Сменить город")],
+    ],
+    resize_keyboard=True,
+)
+
+MORE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="☕ Кофе с видом"),       KeyboardButton(text="🌅 На рассвет")],
+        [KeyboardButton(text="👨‍👩‍👧 С детьми"),        KeyboardButton(text="❤️ Для двоих")],
+        [KeyboardButton(text="🏔 На природу"),          KeyboardButton(text="🌃 Вечером")],
+        [KeyboardButton(text="💎 Неочевидное место"),  KeyboardButton(text="💬 Оставить отзыв")],
+        [KeyboardButton(text="ℹ️ О проекте"),           KeyboardButton(text="🛠 Поддержка")],
         [KeyboardButton(text="🏠 Главное меню")],
     ],
     resize_keyboard=True,
-    one_time_keyboard=False,
+)
+
+ROUTE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔄 Другой маршрут")],
+        [KeyboardButton(text="🏠 Главное меню")],
+    ],
+    resize_keyboard=True,
+)
+
+CITY_INPUT_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="❌ Отмена")]],
+    resize_keyboard=True,
+)
+
+CITY_CONFIRM_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Да"), KeyboardButton(text="❌ Нет, другой город")],
+    ],
+    resize_keyboard=True,
 )
 
 PHOTO_KB = ReplyKeyboardMarkup(
@@ -168,23 +163,36 @@ PHOTO_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-ZODIAC_SIGNS = [
-    "♈ Овен", "♉ Телец", "♊ Близнецы", "♋ Рак",
-    "♌ Лев", "♍ Дева", "♎ Весы", "♏ Скорпион",
-    "♐ Стрелец", "♑ Козерог", "♒ Водолей", "♓ Рыбы",
-]
+HOTEL_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="💰 Бюджетно"),      KeyboardButton(text="✨ Комфорт")],
+        [KeyboardButton(text="👑 Премиум"),        KeyboardButton(text="👨‍👩‍👧 Для семьи")],
+        [KeyboardButton(text="❤️ Для пары"),       KeyboardButton(text="📍 В центре")],
+        [KeyboardButton(text="🏠 Главное меню")],
+    ],
+    resize_keyboard=True,
+)
 
+# ──────────────────────────────────────────────────────────────
+# НАБОРЫ КНОПОК
+# ──────────────────────────────────────────────────────────────
 THEME_BUTTONS = {
     "🍽 Где поесть", "☕ Кофе с видом", "🌅 На рассвет", "🎭 Куда сходить",
-    "👨‍👩‍👧 С детьми", "💑 Романтика", "🏔 На природу", "🌃 Вечер",
-    "🗺 Маршрут на день", "💬 Местный советует",
+    "👨‍👩‍👧 С детьми", "❤️ Для двоих", "🏔 На природу", "🌃 Вечером",
+    "🗺 Маршрут на день", "💎 Неочевидное место",
 }
+
+HOTEL_FORMATS = {
+    "💰 Бюджетно", "✨ Комфорт", "👑 Премиум",
+    "👨‍👩‍👧 Для семьи", "❤️ Для пары", "📍 В центре",
+}
+
 SYSTEM_BUTTONS = {
-    "✏️ Свой вопрос", "🛠 Поддержка", "ℹ️ О проекте",
-    "🏙 Сменить город", "💬 Оставить отзыв", "🏠 Главное меню",
-    "🔔 Утренние сообщения", "🔍 Определить место", "✏️ Напишу сам",
-    "◀️ Назад к городам",
-}
+    "✏️ Свой вопрос", "🛠 Поддержка", "ℹ️ О проекте", "🏙 Сменить город",
+    "💬 Оставить отзыв", "🏠 Главное меню", "➕ Ещё", "🏨 Где остановиться",
+    "🔍 Определить место", "✏️ Напишу сам", "🔄 Другой маршрут",
+    "✅ Да", "❌ Нет, другой город", "❌ Отмена",
+} | HOTEL_FORMATS
 
 BACK_TEXT = "\n\n✨ Что ещё найдём? Жми или пиши 👇"
 
@@ -192,11 +200,12 @@ BACK_TEXT = "\n\n✨ Что ещё найдём? Жми или пиши 👇"
 # FSM
 # ──────────────────────────────────────────────────────────────
 class UserState(StatesGroup):
-    choosing_city    = State()
-    choosing_crimea  = State()
-    choosing_zodiac  = State()
-    writing_review   = State()
-    waiting_photo_action = State()  # ждём что делать с фото
+    entering_city        = State()
+    confirming_city      = State()
+    confirming_ambiguous = State()
+    writing_review       = State()
+    waiting_photo_action = State()
+    choosing_hotel       = State()
 
 # ──────────────────────────────────────────────────────────────
 # КЛИЕНТЫ
@@ -205,8 +214,17 @@ bot    = Bot(token=BOT_TOKEN)
 dp     = Dispatcher(storage=MemoryStorage())
 client = OpenAI(api_key=OPENAI_KEY, base_url="https://api.proxyapi.ru/openai/v1")
 
-# Антифлуд: user_id -> timestamp последнего запроса
+# Антифлуд: user_id → timestamp
 last_request_time: dict[int, float] = {}
+
+# Блокировка параллельных запросов: не даём отправить второй пока первый ещё идёт
+active_requests: set[int] = set()
+
+# Контекст диалога: user_id → список {"role": ..., "content": ...}
+dialog_context: dict[int, list] = {}
+
+# История мест маршрутов: user_id → list названий (накапливается, макс 20)
+route_history: dict[int, list] = {}
 
 # ──────────────────────────────────────────────────────────────
 # БАЗА ДАННЫХ
@@ -214,82 +232,92 @@ last_request_time: dict[int, float] = {}
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Основная таблица пользователей
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id        INTEGER PRIMARY KEY,
             name           TEXT,
             username       TEXT,
-            city           TEXT DEFAULT 'Сочи',
-            city_emoji     TEXT DEFAULT '🌊 Сочи',
-            zodiac         TEXT DEFAULT NULL,
+            city           TEXT DEFAULT NULL,
             registered_at  TEXT,
             last_active    TEXT,
             total_requests INTEGER DEFAULT 0,
             is_premium     INTEGER DEFAULT 1,
-            morning_notify INTEGER DEFAULT 1,
             ref_by         INTEGER DEFAULT NULL
         )
     """)
-    # Миграции для старых баз
-    for col, definition in [
-        ("zodiac",         "TEXT DEFAULT NULL"),
-        ("morning_notify", "INTEGER DEFAULT 1"),
-        ("ref_by",         "INTEGER DEFAULT NULL"),
-    ]:
-        try:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
-        except Exception:
-            pass
+    # Таблица реакций на подборки
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS feedback (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            response_id     TEXT,
+            user_id         INTEGER,
+            username        TEXT,
+            city            TEXT,
+            category        TEXT,
+            rating          TEXT,
+            negative_reason TEXT DEFAULT NULL,
+            created_at      TEXT,
+            UNIQUE(response_id, user_id)
+        )
+    """)
+    # Таблица метаданных ответов — для связи реакции с категорией
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS responses (
+            response_id TEXT PRIMARY KEY,
+            user_id     INTEGER,
+            city        TEXT,
+            category    TEXT,
+            created_at  TEXT
+        )
+    """)
+    # Миграция: убираем дубли и создаём уникальный индекс для feedback
+    # (на новой базе UNIQUE уже в CREATE TABLE, для старой базы нужен индекс)
+    c.execute("""
+        DELETE FROM feedback
+        WHERE id NOT IN (
+            SELECT MAX(id)
+            FROM feedback
+            GROUP BY response_id, user_id
+        )
+    """)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_response_user
+        ON feedback(response_id, user_id)
+    """)
     conn.commit()
     conn.close()
 
 def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # доступ к колонкам по имени, а не по номеру — устойчиво к миграциям
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
     return row
 
-def save_user(user_id, name, username, city="Сочи", city_emoji="🌊 Сочи", ref_by=None):
+def save_user(user_id, name, username, city=None, ref_by=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     c.execute("""
-        INSERT INTO users (user_id, name, username, city, city_emoji, registered_at, last_active, ref_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (user_id, name, username, city, registered_at, last_active, ref_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
-            name=excluded.name, username=excluded.username, last_active=excluded.last_active
-    """, (user_id, name, username or "", city, city_emoji, now, now, ref_by))
+            name=excluded.name,
+            username=excluded.username,
+            last_active=excluded.last_active
+    """, (user_id, name, username or "", city, now, now, ref_by))
     conn.commit()
     conn.close()
 
-def update_city(user_id, city, city_emoji):
+def update_city(user_id, city):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE users SET city=?, city_emoji=? WHERE user_id=?", (city, city_emoji, user_id))
+    c.execute("UPDATE users SET city=? WHERE user_id=?", (city, user_id))
     conn.commit()
     conn.close()
-
-def update_zodiac(user_id, zodiac):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET zodiac=? WHERE user_id=?", (zodiac, user_id))
-    conn.commit()
-    conn.close()
-
-def toggle_morning(user_id) -> bool:
-    """Переключает morning_notify, возвращает новое значение"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT morning_notify FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    new_val = 0 if (row and row[0] == 1) else 1
-    c.execute("UPDATE users SET morning_notify=? WHERE user_id=?", (new_val, user_id))
-    conn.commit()
-    conn.close()
-    return bool(new_val)
 
 def increment_requests(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -302,55 +330,70 @@ def increment_requests(user_id):
     conn.commit()
     conn.close()
 
-def get_all_users_for_morning():
+def save_response_meta(response_id: str, user_id: int, city: str, category: str):
+    """Сохраняет метаданные ответа для последующей привязки реакции к категории."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT user_id, city, zodiac FROM users WHERE morning_notify=1")
-    rows = c.fetchall()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    c.execute("""
+        INSERT OR IGNORE INTO responses (response_id, user_id, city, category, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (response_id, user_id, city or "", category, now))
+    conn.commit()
     conn.close()
-    return rows
+
+def get_response_meta(response_id: str) -> dict:
+    """Возвращает метаданные ответа по response_id."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM responses WHERE response_id=?", (response_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"city": row["city"], "category": row["category"], "user_id": row["user_id"]}
+    return {}
+
+def save_feedback(response_id, user_id, username, city, category, rating, negative_reason=None):
+    """Сохраняет реакцию. UPSERT — повторная реакция обновляет запись."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    c.execute("""
+        INSERT INTO feedback (response_id, user_id, username, city, category, rating, negative_reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(response_id, user_id) DO UPDATE SET
+            rating=excluded.rating,
+            negative_reason=excluded.negative_reason,
+            created_at=excluded.created_at
+    """, (response_id, user_id, username or "", city or "", category, rating, negative_reason, now))
+    conn.commit()
+    conn.close()
 
 def get_user_city(user_id):
     row = get_user(user_id)
-    if row:
-        return row["city"], row["city_emoji"]
-    return "Сочи", "🌊 Сочи"
-
-def get_user_zodiac(user_id):
-    row = get_user(user_id)
-    if row is not None and "zodiac" in row.keys():
-        return row["zodiac"]
-    return None
-
-def get_morning_status(user_id) -> bool:
-    row = get_user(user_id)
-    if row is not None and "morning_notify" in row.keys():
-        return bool(row["morning_notify"])
-    return True
-
-def has_zodiac_set(user_id):
-    """True если зодиак уже выбирали (включая 'skip')"""
-    row = get_user(user_id)
-    if row is None or "zodiac" not in row.keys():
-        return False
-    zodiac = row["zodiac"]
-    # Зодиак задан если значение не NULL и не пустая строка
-    return zodiac is not None and zodiac != ""
+    return row["city"] if row else None
 
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
-    c.execute("SELECT city, COUNT(*) as cnt FROM users GROUP BY city ORDER BY cnt DESC LIMIT 5")
+    c.execute("SELECT city, COUNT(*) cnt FROM users WHERE city IS NOT NULL GROUP BY city ORDER BY cnt DESC LIMIT 7")
     top_cities = c.fetchall()
     today = datetime.now().strftime("%d.%m.%Y")
     c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",))
     active_today = c.fetchone()[0]
     c.execute("SELECT SUM(total_requests) FROM users")
     total_req = c.fetchone()[0] or 0
+    c.execute("SELECT COUNT(*) FROM users WHERE city IS NULL")
+    no_city = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM feedback WHERE rating='positive'")
+    pos = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM feedback WHERE rating='negative'")
+    neg = c.fetchone()[0]
     conn.close()
-    return total, top_cities, active_today, total_req
+    return total, top_cities, active_today, total_req, no_city, pos, neg
 
 # ──────────────────────────────────────────────────────────────
 # АНТИФЛУД
@@ -361,7 +404,6 @@ def is_flood(user_id: int) -> bool:
     if now - last < FLOOD_SECONDS:
         return True
     last_request_time[user_id] = now
-    # Периодическая очистка старых записей, чтобы словарь не рос бесконечно
     if len(last_request_time) > 1000:
         cutoff = now - 3600
         for uid in [u for u, t in last_request_time.items() if t < cutoff]:
@@ -369,580 +411,1104 @@ def is_flood(user_id: int) -> bool:
     return False
 
 # ──────────────────────────────────────────────────────────────
-# GPT
+# КОНТЕКСТ ДИАЛОГА
 # ──────────────────────────────────────────────────────────────
-def get_system_prompt(city):
-    events = CITY_EVENTS.get(city, ("https://kudago.com/", "https://afisha.yandex.ru/"))
-    kudago_url, afisha_url = events
+def get_context(user_id: int) -> list:
+    """Возвращает историю диалога пользователя."""
+    return dialog_context.get(user_id, [])
 
-    crimea_note = ""
-    if city in ("Ялта", "Севастополь", "Симферополь", "Евпатория", "Керчь"):
-        crimea_note = f"""
-ОСОБЕННОСТЬ КРЫМА:
-- Учитывай сезонность: летом — пляжи, зимой — горы и история.
-- Делай акцент на уникальных крымских местах: набережные, крепости, виноградники, горные маршруты.
-- Для {city} учитывай специфику города (Ялта — курорт, Севастополь — история флота и т.д.)
-"""
+def add_to_context(user_id: int, role: str, content: str):
+    """Добавляет сообщение в контекст, обрезает до CONTEXT_TURNS пар."""
+    ctx = dialog_context.setdefault(user_id, [])
+    ctx.append({"role": role, "content": content})
+    # Храним только последние CONTEXT_TURNS*2 сообщений (пары user+assistant)
+    if len(ctx) > CONTEXT_TURNS * 2:
+        ctx[:] = ctx[-(CONTEXT_TURNS * 2):]
 
-    return f"""Ты — AI Местный, виртуальный друг который отлично знает город {city}. Живёшь там много лет.
+def clear_context(user_id: int):
+    """Очищает контекст и историю маршрутов (при смене города)."""
+    dialog_context.pop(user_id, None)
+    route_history.pop(user_id, None)
 
-ТВОЯ ЗАДАЧА: помогать людям находить интересные места и активности в городе {city}.
+# ──────────────────────────────────────────────────────────────
+# ССЫЛКИ НА КАРТЫ — программное построение
+# ──────────────────────────────────────────────────────────────
+def make_map_links(place_name: str, city: str) -> str:
+    """Формирует поисковые ссылки на Яндекс.Карты и 2ГИС."""
+    query = urllib.parse.quote(f"{place_name} {city}")
+    yandex = f"https://yandex.ru/maps/?text={query}"
+    gis    = f"https://2gis.ru/search/{query}"
+    return f"🗺 Яндекс.Карты: {yandex}\n🗺 2ГИС: {gis}"
 
-СТИЛЬ ОБЩЕНИЯ:
-- Говори как живой человек, тепло и дружелюбно. Без канцелярита.
-- Можно на ты.
-- СТРОГО ЗАПРЕЩЕНО использовать markdown: никаких **, __, ##, [], ``. Совсем.
-- Эмодзи умеренно — 1-2 на место, не больше.
-{crimea_note}
-ФОРМАТ КАЖДОГО МЕСТА:
-1. Название места
-📍 Район или улица
-💚 Доступные цены / 💛 Средние цены / 💰 Цены выше среднего (выбери одно)
-✨ Фишка — почему стоит идти (1-2 предложения)
-🗺 Яндекс.Карты: https://yandex.ru/maps/?text=[название места]+[район]+{city}
-🗺 2ГИС: https://2gis.ru/search/[название места]+{city}
-⚠️ Актуальные цены и часы уточняйте по телефону или по ссылкам выше
+# ──────────────────────────────────────────────────────────────
+# РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
+# ──────────────────────────────────────────────────────────────
+async def send_long(msg: Message, text: str, **kwargs):
+    """Отправляет текст, разбивая на части если превышает лимит Telegram.
+    Уровни разбиения: по \n\n → по \n → по символам."""
+    if len(text) <= MAX_MSG_LEN:
+        await msg.answer(text, **kwargs)
+        return
 
-ВАЖНО для ссылок: замени [название места] на реальное название, [район] на район. Не пиши скобки в ссылке.
+    def split_text(t: str, limit: int) -> list[str]:
+        """Рекурсивно делит текст на части не длиннее limit."""
+        if len(t) <= limit:
+            return [t]
+        parts = []
+        # Сначала по двойному переносу
+        for sep in ("\n\n", "\n"):
+            chunks = t.split(sep)
+            current = ""
+            for chunk in chunks:
+                candidate = (current + sep + chunk).strip() if current else chunk
+                if len(candidate) <= limit:
+                    current = candidate
+                else:
+                    if current:
+                        parts.append(current.strip())
+                    # Если сам chunk > limit — режем по символам
+                    if len(chunk) > limit:
+                        for i in range(0, len(chunk), limit):
+                            parts.append(chunk[i:i+limit])
+                        current = ""
+                    else:
+                        current = chunk
+            if current:
+                parts.append(current.strip())
+            if parts:
+                return [p for p in parts if p]
+        # Последний уровень — по символам
+        return [t[i:i+limit] for i in range(0, len(t), limit)]
 
-ПРАВИЛА:
-- Никогда не пиши конкретные цены в рублях.
-- Никогда не выдумывай телефоны.
-- Давай 5-7 мест в ответе.
-- Если человек нажал кнопку — СРАЗУ давай подборку БЕЗ ВОПРОСОВ.
-- Никогда не спрашивай про бюджет или компанию — человек сам уточнит.
-- Только если город большой (Москва, СПб) — можно спросить район одним вопросом.
+    parts = split_text(text, MAX_MSG_LEN)
+    for i, part in enumerate(parts):
+        kw = kwargs.copy()
+        if i < len(parts) - 1:
+            kw.pop("reply_markup", None)
+        await msg.answer(part, **kw)
+        if i < len(parts) - 1:
+            await asyncio.sleep(0.3)
 
-КНОПКА "КУДА СХОДИТЬ":
-Дай ссылки на афишу:
-- {kudago_url}
-- {afisha_url}
+# ──────────────────────────────────────────────────────────────
+# INLINE РЕАКЦИИ
+# ──────────────────────────────────────────────────────────────
+def feedback_kb(response_id: str) -> InlineKeyboardMarkup:
+    """Кнопки реакции под подборкой."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="👍 Полезно",    callback_data=f"fb_pos:{response_id}"),
+        InlineKeyboardButton(text="👎 Не подошло", callback_data=f"fb_neg:{response_id}"),
+    ]])
 
-КНОПКА "МАРШРУТ НА ДЕНЬ":
-Составь план утро → день → вечер с маршрутом между точками.
+def feedback_reasons_kb(response_id: str) -> InlineKeyboardMarkup:
+    """Причины негативной реакции."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Слишком дорого",         callback_data=f"fb_why:{response_id}:expensive")],
+        [InlineKeyboardButton(text="📍 Слишком далеко",         callback_data=f"fb_why:{response_id}:far")],
+        [InlineKeyboardButton(text="🎯 Не мой формат",          callback_data=f"fb_why:{response_id}:format")],
+        [InlineKeyboardButton(text="❌ Место неверное/закрыто", callback_data=f"fb_why:{response_id}:wrong")],
+        [InlineKeyboardButton(text="🔄 Хочу другие варианты",   callback_data=f"fb_why:{response_id}:other")],
+    ])
 
-КНОПКА "МЕСТНЫЙ СОВЕТУЕТ":
-Один инсайд про {city} — лайфхак, секрет, традиция. Без конкретных заведений. 3-5 предложений.
-
-Если пишут про другой город — предложи сменить город кнопкой 🏙 Сменить город."""
-
-
-def _ask_sync(user_text, city):
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": get_system_prompt(city)},
-            {"role": "user",   "content": user_text},
-        ],
-        max_tokens=2000,
-    )
-    return response.choices[0].message.content.strip()
-
-
-async def ask_ai(text, city):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _ask_sync, text, city)
-
-
-def _city_intro_sync(city):
-    """Короткая визитка города при первом выборе"""
-    prompt = (
-        f"Напиши короткую живую визитку города {city} — 2-3 предложения. "
-        f"Что делает этот город особенным? Без перечислений, без markdown. "
-        f"Тёплый дружеский тон."
-    )
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,
-    )
-    return response.choices[0].message.content.strip()
-
-
-async def get_city_intro(city):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _city_intro_sync, city)
-
-
-def _morning_sync(city, zodiac):
-    has_zodiac = zodiac and zodiac != "skip"
-
-    structure = f"1. Один интересный и неожиданный факт о городе {city} который мало кто знает (2-3 предложения)"
-    fmt = f"🏛 Факт о {city}:\n[факт]"
-
-    if has_zodiac:
-        structure += f"\n2. Персональный гороскоп для знака {zodiac} на сегодня (2-3 предложения, позитивный и вдохновляющий, конкретный совет на день)"
-        fmt += f"\n\n{zodiac} сегодня:\n[гороскоп]"
-
-    prompt = (
-        "Напиши короткое утреннее сообщение на русском языке.\n\n"
-        f"Структура:\n{structure}\n\n"
-        f"Формат ответа (строго):\n{fmt}\n\n"
-        "Стиль: тёплый, дружеский, живой язык. Никакого markdown форматирования."
-    )
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=350,
-    )
-    return response.choices[0].message.content.strip()
-
-
-async def get_morning_msg(city, zodiac):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _morning_sync, city, zodiac)
-
-
-def _identify_place_sync(image_base64: str, city: str) -> str:
-    """Определяет место по фото через GPT-4o Vision"""
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}",
-                            "detail": "low"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Посмотри на фото и определи что это за место. "
-                            f"Пользователь находится в городе {city}.\n\n"
-                            f"Ответь в таком формате (без markdown):\n"
-                            f"Место: [название если знаешь, или описание]\n"
-                            f"Город/район: [город и район если можешь определить]\n"
-                            f"Адрес: [адрес если знаешь]\n"
-                            f"Координаты: [если знаешь]\n"
-                            f"Описание: [2-3 предложения что это за место]\n\n"
-                            f"Если не можешь точно определить — честно скажи что именно видишь на фото "
-                            f"и предложи как это можно найти. Не выдумывай адреса."
-                        )
-                    }
-                ]
-            }
-        ],
-        max_tokens=500,
-    )
-    return response.choices[0].message.content.strip()
-
-
-async def identify_place(image_base64: str, city: str) -> str:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _identify_place_sync, image_base64, city)
-
+def new_response_id() -> str:
+    """Уникальный ID для каждого ответа."""
+    return uuid.uuid4().hex[:12]
 
 # ──────────────────────────────────────────────────────────────
 # GOOGLE SHEETS
 # ──────────────────────────────────────────────────────────────
 def _get_sheet(sheet_name):
     creds = Credentials.from_service_account_file(
-        CREDENTIALS, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return gspread.authorize(creds).open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+        CREDENTIALS,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
 
+# ──────────────────────────────────────────────────────────────
+# Единая схема строк в листе «Аналитика Сочи»:
+# user_id | @username | дата | тип | город | текст/категория | доп.поле
+#
+# Типы строк:
+#   Запрос         — обычный запрос пользователя
+#   Отзыв          — текстовый отзыв через кнопку
+#   Реакция 👍     — положительная реакция на подборку
+#   Реакция 👎     — отрицательная реакция, доп.поле = причина
+# ──────────────────────────────────────────────────────────────
+
+def _append_row(row: list):
+    """Добавляет строку в основной лист аналитики."""
+    try:
+        ws  = _get_sheet(SHEET_NAME)
+        ws.append_row(row)
+    except Exception as e:
+        logging.warning(f"Sheets append error: {e}")
 
 def _log_sync(user_id, name, username, msg_type, text, resp_len=0):
-    try:
-        sheet = _get_sheet(SHEET_NAME)
-        now   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        uname = f"@{username}" if username else "(нет username)"
-        sheet.append_row([now, str(user_id), name, uname, msg_type, text[:500], str(resp_len)])
-    except Exception as e:
-        logging.error(f"Sheets error: {e}")
-
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    _append_row([str(user_id), name, f"@{username}" if username else "", now,
+                 "Запрос", msg_type, text, resp_len])
 
 async def log_sheets(user_id, name, username, msg_type, text, resp_len=0):
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _log_sync, user_id, name, username, msg_type, text, resp_len)
 
-
 def _log_review_sync(user_id, name, username, city, review_text):
-    try:
-        sheet = _get_sheet(REVIEW_SHEET)
-        now   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        uname = f"@{username}" if username else "(нет username)"
-        sheet.append_row([now, str(user_id), name, uname, "Отзыв", city, review_text])
-    except Exception as e:
-        logging.error(f"Review sheets error: {e}")
-
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    _append_row([str(user_id), name, f"@{username}" if username else "", now,
+                 "Отзыв", city or "—", review_text, ""])
 
 async def log_review(user_id, name, username, city, review_text):
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _log_review_sync, user_id, name, username, city, review_text)
 
+def _log_feedback_sync(response_id, user_id, username, city, category, rating, reason=None):
+    now  = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    icon = "👍" if rating == "positive" else "👎"
+    _append_row([str(user_id), f"@{username}" if username else "", "", now,
+                 f"Реакция {icon}", city or "—", category, reason or ""])
+
+async def log_feedback_sheets(response_id, user_id, username, city, category, rating, reason=None):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None, _log_feedback_sync, response_id, user_id, username, city, category, rating, reason
+    )
 
 # ──────────────────────────────────────────────────────────────
-# УТРЕННЯЯ РАССЫЛКА
+# GPT — ОПРЕДЕЛЕНИЕ ГОРОДА
 # ──────────────────────────────────────────────────────────────
-async def send_morning_messages():
-    users = get_all_users_for_morning()
-    logging.info(f"Утренняя рассылка: {len(users)} пользователей")
-    for user_id, city, zodiac in users:
-        try:
-            msg_text  = await get_morning_msg(city, zodiac)
-            full_text = (
-                f"☀️ Доброе утро!\n\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"{msg_text}\n"
-                f"━━━━━━━━━━━━━━━\n\n"
-                f"🗺 Чем могу помочь сегодня? Жми кнопку или пиши 👇"
+def _detect_city_sync(user_input: str) -> dict:
+    """
+    Статусы:
+    - ok: чёткий российский город/курорт
+    - suggest: опечатка или падежная форма → suggestion
+    - ambiguous: одноимённые города → variants (список строк с регионом)
+    - destination: конкретный курорт, посёлок (Красная Поляна, Домбай, Шерегеш)
+    - region: большой регион без конкретного места (Алтай, Карелия, Дагестан, Байкал)
+    - not_city: не населённый пункт вообще
+    - foreign: иностранный город
+    """
+    prompt = f"""Пользователь ввёл: "{user_input}"
+
+Определи что это.
+
+Ответь ТОЛЬКО в формате JSON (без markdown, без пояснений):
+{{
+  "status": "ok"|"suggest"|"ambiguous"|"destination"|"region"|"not_city"|"foreign",
+  "city": "нормализованное название" или null,
+  "suggestion": "исправленный вариант" или null,
+  "variants": ["Вариант 1 (регион)", "Вариант 2 (регион)"] или null
+}}
+
+Правила:
+- "ok": явный российский город (Сочи, Казань, Владивосток) — нормализуй
+- "suggest": опечатка или падеж (Сачи→Сочи, питер→Санкт-Петербург, екб→Екатеринбург)
+- "ambiguous": одноимённые города в разных регионах — дай variants с уточнением региона
+  Примеры: Киров, Советск, Красноармейск, Заречный, Александровск
+- "destination": конкретный курорт, посёлок или туристическое место (не крупный город):
+  Красная Поляна, Домбай, Архыз, Шерегеш, Роза Хутор, Лазаревское, Сириус, Адлер, Дивеево
+- "region": большой регион, республика, природный объект без конкретной точки:
+  Алтай, Карелия, Дагестан, Байкал, Камчатка, Кавказ, Крым (без города), Урал
+- "not_city": не населённый пункт (хочу на море, покажи красивые места, хочу в горы)
+- "foreign": иностранный город
+
+Примеры:
+"Сочи" → {{"status":"ok","city":"Сочи","suggestion":null,"variants":null}}
+"Сачи" → {{"status":"suggest","city":null,"suggestion":"Сочи","variants":null}}
+"питер" → {{"status":"suggest","city":null,"suggestion":"Санкт-Петербург","variants":null}}
+"Советск" → {{"status":"ambiguous","city":null,"suggestion":null,"variants":["Советск (Калининградская область)","Советск (Кировская область)"]}}
+"Красная Поляна" → {{"status":"destination","city":"Красная Поляна","suggestion":null,"variants":null}}
+"Алтай" → {{"status":"region","city":"Алтай","suggestion":null,"variants":null}}
+"хочу на море" → {{"status":"not_city","city":null,"suggestion":null,"variants":null}}
+"Барселона" → {{"status":"foreign","city":null,"suggestion":null,"variants":null}}"""
+
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150,
+        temperature=0,
+    )
+    raw = resp.choices[0].message.content.strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw)
+
+async def detect_city(user_input: str) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _detect_city_sync, user_input)
+
+# ──────────────────────────────────────────────────────────────
+# GPT — ВИЗИТКА ГОРОДА
+# ──────────────────────────────────────────────────────────────
+def _city_intro_sync(city: str) -> str:
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": (
+            f"Напиши короткую живую визитку для туриста про {city} — 2-3 предложения. "
+            f"Тон дружелюбный, без канцелярита. Никакого markdown. "
+            f"Скажи что особенного в этом месте."
+        )}],
+        max_tokens=150,
+        temperature=0.8,
+    )
+    return resp.choices[0].message.content.strip()
+
+async def get_city_intro(city: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _city_intro_sync, city)
+
+# ──────────────────────────────────────────────────────────────
+# GPT — СИСТЕМНЫЙ ПРОМПТ
+# ──────────────────────────────────────────────────────────────
+def get_system_prompt(city: str) -> str:
+    events = CITY_EVENTS.get(city)
+    if events:
+        kudago_url, afisha_url = events
+        events_block = (
+            f"КНОПКА 'КУДА СХОДИТЬ':\n"
+            f"Дай ссылки на афишу:\n- {kudago_url}\n- {afisha_url}\n"
+            f"И кратко расскажи что обычно проходит в {city}."
+        )
+    else:
+        events_block = (
+            f"КНОПКА 'КУДА СХОДИТЬ':\n"
+            f"Для {city} крупных афиш нет. Расскажи про краеведческий музей, "
+            f"дом культуры, парки. Посоветуй искать афишу в группе города ВКонтакте. "
+            f"Не выдумывай конкретные даты мероприятий."
+        )
+
+    return f"""Ты — AI Местный, гид по городам и направлениям России.
+
+ГОРОД/НАПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ: {city}
+
+СТИЛЬ: дружелюбно, как живой человек. Без канцелярита. Можно на «ты».
+ЗАПРЕЩЕНО: markdown (**, __, ##, [], ``), конкретные цены в рублях, телефоны.
+
+ФОРМАТ ОТВЕТА — СТРОГО JSON:
+Для подборок мест (Где поесть, Кофе с видом, С детьми и т.д.):
+{{
+  "type": "places",
+  "intro": "Вводная фраза (1 предложение, опционально)",
+  "places": [
+    {{
+      "name": "Название места",
+      "area": "Район или улица",
+      "price": "Доступные" | "Средние" | "Выше среднего",
+      "description": "Почему стоит идти — 1-2 предложения"
+    }}
+  ],
+  "outro": "Закрывающая фраза (опционально)"
+}}
+
+Для маршрута на день:
+{{
+  "type": "route",
+  "title": "Маршрут на день по {city}",
+  "slots": [
+    {{
+      "time": "09:00",
+      "name": "Название места",
+      "area": "Район/адрес",
+      "price": "Доступные" | "Средние" | "Выше среднего",
+      "description": "Что здесь делать и почему — 2-3 предложения"
+    }}
+  ],
+  "warning": "Часы работы и доступность — уточняйте заранее"
+}}
+
+Для одиночного места (Неочевидное место):
+{{
+  "type": "single",
+  "name": "Название",
+  "area": "Район",
+  "price": "Доступные" | "Средние" | "Выше среднего",
+  "description": "Полное описание — 3-5 предложений",
+  "tip": "Когда лучше приехать и что учесть"
+}}
+
+Для свободного текстового ответа (Куда сходить, вопросы без мест):
+{{
+  "type": "text",
+  "text": "Обычный текст ответа"
+}}
+
+ПРАВИЛА:
+- Всегда отвечай ТОЛЬКО валидным JSON без markdown-обёрток
+- Давай 5-7 мест для подборок (для маленьких городов — сколько знаешь достоверно, лучше 3 честных чем 7 выдуманных)
+- Если нажали кнопку — СРАЗУ давай подборку без вопросов
+- Для Москвы и СПб — можно спросить район одним вопросом
+- Маршрут: логичная география (не гоняй по всему городу), слоты 09:00→11:30→14:00→16:30→19:00
+- Не повторяй места из разных слотов маршрута
+
+{events_block}"""
+
+# ──────────────────────────────────────────────────────────────
+# GPT — ОСНОВНОЙ ЗАПРОС (с контекстом)
+# ──────────────────────────────────────────────────────────────
+def _ask_sync(user_text: str, city: str, context: list) -> str:
+    messages = [{"role": "system", "content": get_system_prompt(city)}]
+    messages.extend(context)
+    messages.append({"role": "user", "content": user_text})
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        max_tokens=2000,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+async def ask_ai(text: str, city: str, context: list) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ask_sync, text, city, context)
+
+# ──────────────────────────────────────────────────────────────
+# ПАРСИНГ JSON-ОТВЕТА GPT → ТЕКСТ + ССЫЛКИ
+# ──────────────────────────────────────────────────────────────
+def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
+    """
+    Парсит JSON-ответ GPT, строит текст с программными ссылками.
+    Возвращает (text, place_names, resp_type).
+    resp_type: "places" | "route" | "single" | "text" | "error"
+    """
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = "\n".join(raw.split("\n")[1:])
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logging.warning(f"GPT вернул не JSON: {raw[:200]}")
+        # Не показываем сырой JSON пользователю
+        return "Не удалось корректно собрать подборку. Попробуй запросить ещё раз 👇", [], "error"
+
+    resp_type = data.get("type", "text")
+    place_names = []
+
+    if resp_type == "places":
+        places = data.get("places", [])
+        # Валидация: пустой список — это ошибка
+        if not places:
+            logging.warning("GPT вернул пустой список places")
+            return "Не нашёл конкретных мест по этому запросу. Попробуй уточнить или задай вопрос иначе 👇", [], "error"
+
+        parts = []
+        if data.get("intro"):
+            parts.append(data["intro"])
+            parts.append("")
+        for i, p in enumerate(places, 1):
+            name = p.get("name", "").strip()
+            if not name:
+                continue
+            place_names.append(name)
+            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(p.get("price", ""), "💛")
+            block = (
+                f"{i}. {name}\n"
+                f"📍 {p.get('area', '')}\n"
+                f"{price_emoji} {p.get('price', '')}\n"
+                f"✨ {p.get('description', '')}\n"
+                f"{make_map_links(name, city)}\n"
+                f"⚠️ Цены и часы — уточняйте перед визитом"
             )
-            await bot.send_message(user_id, full_text, reply_markup=MAIN_KB, disable_web_page_preview=True)
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logging.error(f"Morning error {user_id}: {e}")
+            parts.append(block)
+        if data.get("outro"):
+            parts.append("")
+            parts.append(data["outro"])
+        # Финальная проверка: все имена могли оказаться пустыми
+        if not place_names:
+            return "Не удалось получить конкретные места. Попробуй уточнить запрос 👇", [], "error"
+        return "\n\n".join(parts), place_names, resp_type
 
+    elif resp_type == "route":
+        slots = data.get("slots", [])
+        if not slots:
+            logging.warning("GPT вернул пустой маршрут")
+            return "Не удалось составить маршрут. Попробуй ещё раз 👇", [], "error"
 
-async def morning_scheduler():
-    while True:
-        try:
-            now    = datetime.now(MOSCOW_TZ)
-            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
-            logging.info(f"Следующая рассылка через {int(wait_seconds/3600)}ч {int((wait_seconds%3600)/60)}м")
-            await asyncio.sleep(wait_seconds)
-            await send_morning_messages()
-        except Exception as e:
-            logging.error(f"Scheduler error: {e}")
-            await asyncio.sleep(60)  # при ошибке подождать минуту и продолжить
+        parts = [f"🗺 {data.get('title', 'Маршрут на день')}"]
+        for slot in slots:
+            name = slot.get("name", "").strip()
+            if not name:
+                continue
+            place_names.append(name)
+            price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(slot.get("price", ""), "💛")
+            block = (
+                f"━━━━━━━━━━━━━━━\n"
+                f"🕐 {slot.get('time', '')} — {name}\n"
+                f"📍 {slot.get('area', '')}\n"
+                f"{price_emoji} {slot.get('price', '')}\n"
+                f"{slot.get('description', '')}\n"
+                f"{make_map_links(name, city)}"
+            )
+            parts.append(block)
+        parts.append("━━━━━━━━━━━━━━━")
+        if data.get("warning"):
+            parts.append(f"⚠️ {data['warning']}")
+        # Финальная проверка маршрута
+        if not place_names:
+            return "Не удалось составить маршрут — места оказались пустыми. Попробуй ещё раз 👇", [], "error"
+        return "\n\n".join(parts), place_names, resp_type
 
+    elif resp_type == "single":
+        name = data.get("name", "").strip()
+        if not name:
+            return "Не удалось найти место. Попробуй уточнить запрос 👇", [], "error"
+        place_names.append(name)
+        price_emoji = {"Доступные": "💚", "Средние": "💛", "Выше среднего": "💰"}.get(data.get("price", ""), "💛")
+        text = (
+            f"💎 {name}\n\n"
+            f"📍 {data.get('area', '')}\n"
+            f"{price_emoji} {data.get('price', '')}\n\n"
+            f"{data.get('description', '')}\n\n"
+            f"💡 {data.get('tip', '')}\n\n"
+            f"{make_map_links(name, city)}\n"
+            f"⚠️ Цены и часы — уточняйте перед визитом"
+        )
+        return text, place_names, resp_type
+
+    else:  # text
+        text_content = data.get("text", "")
+        if not text_content:
+            return "Не получил ответ. Попробуй переформулировать вопрос 👇", [], "error"
+        return text_content, [], "text"
 
 # ──────────────────────────────────────────────────────────────
-# ХЕЛПЕРЫ
+# GPT — ОТЕЛИ (JSON)
 # ──────────────────────────────────────────────────────────────
-def full_name(user):
-    return " ".join(p for p in [user.first_name or "", user.last_name or ""] if p).strip() or "—"
+def _ask_hotels_sync(city: str, hotel_format: str) -> str:
+    format_map = {
+        "💰 Бюджетно":    "бюджетные (хостелы, недорогие гостиницы, апартаменты)",
+        "✨ Комфорт":     "комфортные 3-4 звезды или хорошие апартаменты",
+        "👑 Премиум":     "премиум 4-5 звезд",
+        "👨‍👩‍👧 Для семьи": "для семьи с детьми",
+        "❤️ Для пары":    "романтические для пары",
+        "📍 В центре":    "в самом центре города",
+    }
+    desc = format_map.get(hotel_format, "комфортные")
+    prompt = f"""Подбери варианты размещения в {city} — {desc}.
 
+Ответь СТРОГО в JSON (без markdown):
+{{
+  "type": "places",
+  "intro": "Вводная фраза про категорию",
+  "places": [
+    {{
+      "name": "Название",
+      "area": "Район/адрес",
+      "price": "Доступные"|"Средние"|"Выше среднего",
+      "description": "Главное преимущество — 1-2 предложения"
+    }}
+  ],
+  "outro": "⚠️ Цены и наличие мест меняются — проверяйте на Ostrovok, Яндекс Путешествия, Суточно.ру"
+}}
+
+Правила:
+- 5 вариантов (если не знаешь 5 достоверно — дай меньше, не выдумывай)
+- Не пиши конкретные цены в рублях, только категорию
+- Не выдумывай адреса если не уверен — пиши только район"""
+
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1200,
+        temperature=0.5,
+    )
+    return resp.choices[0].message.content.strip()
+
+async def ask_hotels(city: str, hotel_format: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ask_hotels_sync, city, hotel_format)
 
 # ──────────────────────────────────────────────────────────────
-# ОБРАБОТЧИКИ
+# GPT — ОПРЕДЕЛЕНИЕ МЕСТА ПО ФОТО
 # ──────────────────────────────────────────────────────────────
+def _identify_place_sync(image_base64: str, city: str) -> str:
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}", "detail": "low"}
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"Посмотри на фото и определи что это за место. "
+                    f"Пользователь интересуется {city}. "
+                    f"Если узнаёшь — назови, опиши, расскажи что интересного. "
+                    f"Если не узнаёшь — честно скажи и предложи написать самому. "
+                    f"Без markdown. Кратко."
+                )
+            }
+        ]}],
+        max_tokens=400,
+    )
+    return resp.choices[0].message.content.strip()
 
+async def identify_place(image_base64: str, city: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _identify_place_sync, image_base64, city)
+
+# ──────────────────────────────────────────────────────────────
+# ВСПОМОГАТЕЛЬНЫЕ
+# ──────────────────────────────────────────────────────────────
+def full_name(user) -> str:
+    parts = [user.first_name or "", user.last_name or ""]
+    return " ".join(p for p in parts if p).strip() or user.username or str(user.id)
+
+def _send_main_menu_text(city: str) -> str:
+    return (
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏙 Сейчас: {city}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"Жми кнопку или пиши что ищешь 👇"
+    )
+
+# ──────────────────────────────────────────────────────────────
+# ЗАЩИТА ОТ ВТОРОГО ЭКЗЕМПЛЯРА
+# ──────────────────────────────────────────────────────────────
+_lock_handle = None
+
+def acquire_single_instance_lock():
+    global _lock_handle
+    _lock_handle = open("/tmp/mestniy_bot.lock", "w")
+    try:
+        fcntl.flock(_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        logging.error("Бот уже запущен в другом процессе. Завершаюсь.")
+        sys.exit(1)
+    _lock_handle.write(str(os.getpid()))
+    _lock_handle.flush()
+
+# ──────────────────────────────────────────────────────────────
+# ОБРАБОТЧИК: /start
+# ──────────────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext):
-    user     = msg.from_user
-    name     = full_name(user)
-    existing = get_user(user.id)
+    await state.clear()
+    user = msg.from_user
+    name = full_name(user)
 
-    # Реферальная система: /start ref_12345678
     ref_by = None
     args = msg.text.split() if msg.text else []
     if len(args) > 1 and args[1].startswith("ref_"):
         try:
             ref_by = int(args[1].replace("ref_", ""))
             if ref_by == user.id:
-                ref_by = None  # нельзя пригласить себя
+                ref_by = None
         except ValueError:
             ref_by = None
 
+    existing = get_user(user.id)
+    save_user(user.id, name, user.username, ref_by=ref_by)
+
     if existing and existing["city"]:
-        city     = existing["city"]
-        city_key = existing["city_emoji"]
-        save_user(user.id, name, user.username, city, city_key)
+        city = existing["city"]
         await msg.answer(
-            f"👋 Привет, {user.first_name or 'друг'}! Рад видеть тебя снова!\n\n"
+            f"👋 С возвращением, {user.first_name or 'друг'}!\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🏙 Твой город: {city_key}\n"
+            f"🏙 Твой город: {city}\n"
             f"━━━━━━━━━━━━━━━\n\n"
-            f"🗺 Готов искать лучшие места — жми кнопку или пиши 👇",
+            f"Жми кнопку или пиши что ищешь 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
+        return
+
+    # Новый — без кнопки Отмена (отменять нечего)
+    await msg.answer(
+        f"Привет, {user.first_name or 'друг'}! 👋\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🗺 Я AI Местный — помогу найти\n"
+        f"идеи для прогулок, еды и отдыха\n"
+        f"в любом городе России 🇷🇺\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"Напиши название города или курорта 🏙",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(UserState.entering_city)
+
+# ──────────────────────────────────────────────────────────────
+# ОБРАБОТЧИКИ: ввод и смена города
+# ──────────────────────────────────────────────────────────────
+@dp.message(F.text == "🏙 Сменить город")
+async def change_city(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer(
+        "🏙 Смена города\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Напиши название города или курорта 👇",
+        reply_markup=CITY_INPUT_KB,
+    )
+    await state.set_state(UserState.entering_city)
+
+
+@dp.message(UserState.entering_city)
+async def handle_city_input(msg: Message, state: FSMContext):
+    text = msg.text.strip() if msg.text else ""
+
+    if text == "❌ Отмена":
+        await state.clear()
+        city = get_user_city(msg.from_user.id)
+        if city:
+            await msg.answer(_send_main_menu_text(city), reply_markup=MAIN_KB)
+        else:
+            await msg.answer("Напиши название города 🏙")
+        return
+
+    thinking = await msg.answer("🔍 Проверяю...")
+    try:
+        result = await detect_city(text)
+    except Exception as e:
+        logging.error(f"detect_city error: {e}")
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        await msg.answer("Что-то пошло не так. Попробуй ещё раз 👇", reply_markup=CITY_INPUT_KB)
+        return
+
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    status = result.get("status")
+
+    if status == "ok":
+        await _finalize_city(msg, state, result["city"])
+
+    elif status == "destination":
+        await _finalize_city(msg, state, result["city"])
+
+    elif status == "region":
+        region = result["city"] or text
+        await msg.answer(
+            f"🗺 {region} — это большой регион.\n\n"
+            f"Напиши конкретный город, курорт или район,\n"
+            f"в котором планируешь побывать 👇",
+            reply_markup=CITY_INPUT_KB,
+        )
+
+    elif status == "suggest":
+        suggestion = result["suggestion"]
+        await state.update_data(suggested_city=suggestion)
+        await state.set_state(UserState.confirming_city)
+        await msg.answer(
+            f"🤔 Вы имеете в виду {suggestion}?\n\nПодтвердите или напишите другой 👇",
+            reply_markup=CITY_CONFIRM_KB,
+        )
+
+    elif status == "ambiguous":
+        variants = result.get("variants") or []
+        # Сохраняем полный список вариантов в FSM
+        await state.update_data(ambiguous_variants=variants)
+        await state.set_state(UserState.confirming_ambiguous)
+        # Передаём ИНДЕКС, а не имя — чтобы не потерять регион
+        buttons = [
+            [InlineKeyboardButton(text=v, callback_data=f"city_pick:{i}")]
+            for i, v in enumerate(variants)
+        ]
+        buttons.append([InlineKeyboardButton(text="✏️ Другой город", callback_data="city_pick:other")])
+        await msg.answer(
+            "🤔 Нашёл несколько городов с таким названием. Уточни какой именно:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
+    elif status == "foreign":
+        await msg.answer(
+            "🇷🇺 Пока работаю только по городам и курортам России.\n\n"
+            "Напиши российский город, например: Сочи, Казань или Владивосток 👇",
+            reply_markup=CITY_INPUT_KB,
+        )
+
+    else:  # not_city
+        await msg.answer(
+            "🤔 Не понял — напиши название конкретного города или курорта.\n\n"
+            "Например: Сочи, Казань, Красная Поляна 👇",
+            reply_markup=CITY_INPUT_KB,
+        )
+
+
+@dp.message(UserState.confirming_city)
+async def handle_city_confirm(msg: Message, state: FSMContext):
+    text = msg.text.strip() if msg.text else ""
+    if text == "✅ Да":
+        data = await state.get_data()
+        await _finalize_city(msg, state, data.get("suggested_city", ""))
+    elif text in ("❌ Нет, другой город", "❌ Отмена"):
+        await state.set_state(UserState.entering_city)
+        await msg.answer("Напиши название города ещё раз 👇", reply_markup=CITY_INPUT_KB)
     else:
-        save_user(user.id, name, user.username, ref_by=ref_by)
-        await msg.answer(
-            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🗺 Я AI Местный — твой городской гид\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"🏘 Показываю города глазами тех, кто там живёт:\n"
-            f"🍽 Кафе куда ходят местные, а не туристы\n"
-            f"📍 Места которых нет в топе Google Maps\n"
-            f"🎭 События о которых узнают за день\n"
-            f"🗺 Маршруты без толпы\n\n"
-            f"🏙 Выбери свой город 👇",
-            reply_markup=CITY_KEYBOARD,
-        )
-        await state.set_state(UserState.choosing_city)
-
-    asyncio.create_task(log_sheets(user.id, name, user.username, "Команда", "/start"))
+        await state.set_state(UserState.entering_city)
+        await handle_city_input(msg, state)
 
 
-@dp.message(UserState.choosing_city)
-async def handle_city_choice(msg: Message, state: FSMContext):
-    text = msg.text.strip() if msg.text else ""
+@dp.callback_query(F.data.startswith("city_pick:"))
+async def handle_city_pick(cq: CallbackQuery, state: FSMContext):
+    raw = cq.data.split("city_pick:", 1)[1]
+    try:
+        await cq.message.delete()
+    except Exception:
+        pass
 
-    # Крым — показываем подменю
-    if text == "🏖 Крым":
-        await msg.answer(
-            "🏖 Крым — солнце, море и история!\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "Выбери город 👇",
-            reply_markup=CRIMEA_KEYBOARD,
-        )
-        await state.set_state(UserState.choosing_crimea)
-        return
-
-    if text not in CITIES:
-        await msg.answer("🏙 Выбери город из списка 👇", reply_markup=CITY_KEYBOARD)
-        return
-
-    await _finalize_city_choice(msg, state, text, CITIES[text]["name"], is_new=not has_zodiac_set(msg.from_user.id))
-
-
-@dp.message(UserState.choosing_crimea)
-async def handle_crimea_choice(msg: Message, state: FSMContext):
-    text = msg.text.strip() if msg.text else ""
-
-    if text == "◀️ Назад к городам":
-        await msg.answer(
-            "🏙 Выбери город 👇",
-            reply_markup=CITY_KEYBOARD,
-        )
-        await state.set_state(UserState.choosing_city)
-        return
-
-    if text not in CRIMEA_CITIES:
-        await msg.answer("🏖 Выбери город Крыма из списка 👇", reply_markup=CRIMEA_KEYBOARD)
-        return
-
-    await _finalize_city_choice(msg, state, text, CRIMEA_CITIES[text]["name"], is_new=not has_zodiac_set(msg.from_user.id))
+    if raw == "other":
+        await state.set_state(UserState.entering_city)
+        await cq.message.answer("Напиши название города 👇", reply_markup=CITY_INPUT_KB)
+    else:
+        # Получаем полный вариант с регионом по индексу
+        try:
+            idx = int(raw)
+            data = await state.get_data()
+            variants = data.get("ambiguous_variants", [])
+            city = variants[idx] if idx < len(variants) else raw
+        except (ValueError, IndexError):
+            city = raw
+        await state.clear()
+        await _finalize_city(cq.message, state, city, user=cq.from_user)
+    await cq.answer()
 
 
-async def _finalize_city_choice(msg: Message, state: FSMContext, city_key: str, city: str, is_new: bool):
-    """Общая логика после выбора города"""
-    update_city(msg.from_user.id, city, city_key)
+async def _finalize_city(msg: Message, state: FSMContext, city: str, user=None):
+    if user is None:
+        user = msg.from_user
+    update_city(user.id, city)
+    clear_context(user.id)
     await state.clear()
 
-    if is_new:
-        # Визитка города + спрашиваем зодиак
-        try:
-            intro = await get_city_intro(city)
-        except Exception:
-            intro = f"{city} — отличный выбор!"
-
-        await msg.answer(
-            f"🎉 Отличный выбор — {city_key}!\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🏙 {intro}\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"✨ Последний штрих!\n\n"
-            f"🔮 Укажи свой знак зодиака — каждое утро в 9:00 буду присылать персональный гороскоп на день!\n\n"
-            f"Не хочешь — нажми Пропустить 👇",
-            reply_markup=ZODIAC_KEYBOARD,
-        )
-        await state.set_state(UserState.choosing_zodiac)
-    else:
-        await msg.answer(
-            f"✅ Город изменён на {city_key}!\n\n"
-            f"🗺 Готов искать лучшие места — жми кнопку или пиши 👇",
-            reply_markup=MAIN_KB,
-            disable_web_page_preview=True,
-        )
-
-
-@dp.message(UserState.choosing_zodiac)
-async def handle_zodiac_choice(msg: Message, state: FSMContext):
-    text = msg.text.strip() if msg.text else ""
-
-    if text == "⏭ Пропустить":
-        update_zodiac(msg.from_user.id, "skip")
-        await state.clear()
-        city, city_key = get_user_city(msg.from_user.id)
-        await msg.answer(
-            f"👌 Хорошо, без гороскопа!\n\n"
-            f"☀️ Каждое утро в 9:00 буду присылать интересный факт о {city}.\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🗺 Всё готово! Жми кнопку или пиши что ищешь 👇",
-            reply_markup=MAIN_KB,
-            disable_web_page_preview=True,
-        )
-        return
-
-    if text in ZODIAC_SIGNS:
-        update_zodiac(msg.from_user.id, text)
-        await state.clear()
-        city, city_key = get_user_city(msg.from_user.id)
-        await msg.answer(
-            f"🔮 {text} — отличный знак!\n\n"
-            f"⭐ Каждое утро в 9:00 тебя будет ждать:\n"
-            f"🏛 Интересный факт о {city}\n"
-            f"✨ Персональный гороскоп на день\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🗺 Всё готово! Жми кнопку или пиши что ищешь 👇",
-            reply_markup=MAIN_KB,
-            disable_web_page_preview=True,
-        )
-        return
+    thinking = await msg.answer(f"🏙 Загружаю {city}...")
+    try:
+        intro = await get_city_intro(city)
+    except Exception:
+        intro = f"Отличный выбор — {city}!"
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
 
     await msg.answer(
-        "🔮 Выбери знак зодиака из списка или нажми Пропустить 👇",
-        reply_markup=ZODIAC_KEYBOARD,
-    )
-
-
-@dp.message(Command("zodiac"))
-async def cmd_zodiac(msg: Message, state: FSMContext):
-    await msg.answer(
-        "🔮 Смена знака зодиака!\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "Выбери свой знак — обновлю гороскоп в утренних сообщениях ✨",
-        reply_markup=ZODIAC_KEYBOARD,
-    )
-    await state.set_state(UserState.choosing_zodiac)
-
-
-@dp.message(Command("stats"))
-async def cmd_stats(msg: Message):
-    if msg.from_user.id != OWNER_ID:
-        return
-    total, top_cities, active_today, total_req = get_stats()
-    cities_text = "\n".join([f"  {city}: {cnt} чел." for city, cnt in top_cities])
-    await msg.answer(
-        f"📊 Статистика AI Местный\n\n"
+        f"🏙 {city}\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👥 Всего пользователей: {total}\n"
-        f"🟢 Активны сегодня: {active_today}\n"
-        f"💬 Всего запросов: {total_req}\n"
+        f"{intro}\n"
         f"━━━━━━━━━━━━━━━\n\n"
-        f"🏙 Топ городов:\n{cities_text}",
+        f"Жми кнопку или пиши что ищешь 👇",
+        reply_markup=MAIN_KB,
+        disable_web_page_preview=True,
     )
 
+# ──────────────────────────────────────────────────────────────
+# CALLBACK: реакции 👍/👎
+# ──────────────────────────────────────────────────────────────
+@dp.callback_query(F.data.startswith("fb_pos:"))
+async def cb_feedback_positive(cq: CallbackQuery):
+    response_id = cq.data.split("fb_pos:", 1)[1]
+    user = cq.from_user
+    meta = get_response_meta(response_id)
 
+    # Защита: только владелец подборки может её оценить
+    if meta and meta.get("user_id") and meta["user_id"] != user.id:
+        await cq.answer("Эта подборка была создана для другого пользователя.", show_alert=True)
+        return
+
+    city     = meta.get("city") or get_user_city(user.id) or ""
+    category = meta.get("category", "")
+    save_feedback(response_id, user.id, user.username, city, category, "positive")
+    try:
+        await cq.message.edit_text("👍 Спасибо! Рад, что пригодилось 😊")
+    except Exception:
+        pass
+    await cq.answer("Спасибо!")
+    asyncio.create_task(log_feedback_sheets(response_id, user.id, user.username, city, category, "positive"))
+
+
+@dp.callback_query(F.data.startswith("fb_neg:"))
+async def cb_feedback_negative(cq: CallbackQuery):
+    response_id = cq.data.split("fb_neg:", 1)[1]
+    user = cq.from_user
+    meta = get_response_meta(response_id)
+
+    # Защита: только владелец подборки
+    if meta and meta.get("user_id") and meta["user_id"] != user.id:
+        await cq.answer("Эта подборка была создана для другого пользователя.", show_alert=True)
+        return
+
+    try:
+        await cq.message.edit_reply_markup(reply_markup=feedback_reasons_kb(response_id))
+    except Exception:
+        pass
+    await cq.answer("Скажи подробнее — что не подошло?")
+
+
+@dp.callback_query(F.data.startswith("fb_why:"))
+async def cb_feedback_reason(cq: CallbackQuery):
+    _, response_id, reason = cq.data.split(":", 2)
+    user = cq.from_user
+    meta = get_response_meta(response_id)
+
+    # Защита: только владелец подборки
+    if meta and meta.get("user_id") and meta["user_id"] != user.id:
+        await cq.answer("Эта подборка была создана для другого пользователя.", show_alert=True)
+        return
+
+    city     = meta.get("city") or get_user_city(user.id) or ""
+    category = meta.get("category", "")
+
+    reason_labels = {
+        "expensive": "Слишком дорого",
+        "far":       "Слишком далеко",
+        "format":    "Не мой формат",
+        "wrong":     "Место неверное/закрыто",
+        "other":     "Хотел другие варианты",
+    }
+    reason_text = reason_labels.get(reason, reason)
+
+    save_feedback(response_id, user.id, user.username, city, category, "negative", reason_text)
+    try:
+        await cq.message.edit_text("✅ Отзыв учтён — спасибо, это помогает стать лучше!")
+    except Exception:
+        pass
+    await cq.answer("Учтено!")
+    asyncio.create_task(log_feedback_sheets(response_id, user.id, user.username, city, category, "negative", reason_text))
+
+# ──────────────────────────────────────────────────────────────
+# ОБЩАЯ ФУНКЦИЯ ОТПРАВКИ РЕЗУЛЬТАТА С РЕАКЦИЯМИ
+# ──────────────────────────────────────────────────────────────
+async def send_result(msg: Message, raw_answer: str, city: str, category: str,
+                      kb=None, with_feedback: bool = True):
+    """Парсит JSON, строит текст с ссылками, отправляет с кнопками реакции."""
+    text, place_names, resp_type = parse_gpt_response(raw_answer, city)
+    full_text = text + BACK_TEXT
+
+    response_id = new_response_id()
+
+    # Реакции показываем только для содержательных подборок
+    show_feedback = with_feedback and resp_type in ("places", "route", "single")
+
+    # Сохраняем метаданные для привязки реакции к категории
+    if show_feedback:
+        save_response_meta(response_id, msg.from_user.id, city, category)
+
+    await send_long(msg, full_text, reply_markup=kb or MAIN_KB, disable_web_page_preview=True)
+    if show_feedback:
+        await msg.answer("Помогло?", reply_markup=feedback_kb(response_id))
+
+    return place_names
+
+# ──────────────────────────────────────────────────────────────
+# ОБРАБОТЧИК: Маршрут на день + Другой маршрут
+# ──────────────────────────────────────────────────────────────
+async def _generate_route(msg: Message):
+    city = get_user_city(msg.from_user.id)
+    if not city:
+        await msg.answer("Сначала выбери город 🏙", reply_markup=CITY_INPUT_KB)
+        return
+    if is_flood(msg.from_user.id):
+        await msg.answer("⏳ Подожди секунду 😊", reply_markup=MAIN_KB)
+        return
+
+    if msg.from_user.id in active_requests:
+        await msg.answer("⏳ Уже обрабатываю предыдущий запрос 😊", reply_markup=MAIN_KB)
+        return
+
+    # Накопленная история всех предыдущих маршрутов (макс 20 мест)
+    prev_places = route_history.get(msg.from_user.id, [])
+    exclude_note = ""
+    if prev_places:
+        exclude_note = (
+            f"\n\nУже показывал эти места — постарайся их не включать:\n{', '.join(prev_places)}\n"
+            f"Если в городе мало мест и без повторов не обойтись — можно повторить максимум 1-2 "
+            f"действительно важных места, но измени остальные точки и логику маршрута."
+        )
+
+    thinking = await msg.answer(f"🗺 Составляю маршрут по {city}...")
+    active_requests.add(msg.from_user.id)
+    try:
+        ctx = get_context(msg.from_user.id)
+        raw = await ask_ai("🗺 Маршрут на день" + exclude_note, city, ctx)
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+
+        # Сохраняем полный raw в контекст
+        _, place_names, _ = parse_gpt_response(raw, city)
+        add_to_context(msg.from_user.id, "user", "🗺 Маршрут на день")
+        add_to_context(msg.from_user.id, "assistant", raw)
+
+        # Накапливаем историю мест — список, последние 20 уникальных
+        history = route_history.setdefault(msg.from_user.id, [])
+        for place in place_names:
+            if place and place not in history:
+                history.append(place)
+        route_history[msg.from_user.id] = history[-20:]
+
+        await send_result(msg, raw, city, "Маршрут на день", kb=ROUTE_KB)
+        increment_requests(msg.from_user.id)
+        asyncio.create_task(log_sheets(
+            msg.from_user.id, full_name(msg.from_user),
+            msg.from_user.username, "Маршрут на день", f"🗺 {city}", len(raw)))
+    except Exception as e:
+        logging.error(f"Route error: {e}")
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        await msg.answer("Что-то пошло не так. Попробуй ещё раз." + BACK_TEXT, reply_markup=MAIN_KB)
+    finally:
+        active_requests.discard(msg.from_user.id)
+
+
+@dp.message(F.text == "🗺 Маршрут на день")
+async def btn_route(msg: Message):
+    await _generate_route(msg)
+
+@dp.message(F.text == "🔄 Другой маршрут")
+async def btn_another_route(msg: Message):
+    await _generate_route(msg)
+
+# ──────────────────────────────────────────────────────────────
+# ОБРАБОТЧИК: Где остановиться
+# ──────────────────────────────────────────────────────────────
+@dp.message(F.text == "🏨 Где остановиться")
+async def btn_hotels(msg: Message, state: FSMContext):
+    city = get_user_city(msg.from_user.id)
+    if not city:
+        await msg.answer("Сначала выбери город 🏙", reply_markup=CITY_INPUT_KB)
+        await state.set_state(UserState.entering_city)
+        return
+    await msg.answer(
+        f"🏨 Где остановиться в {city}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Выбери формат — подберу варианты 👇",
+        reply_markup=HOTEL_KB,
+    )
+    await state.set_state(UserState.choosing_hotel)
+
+
+@dp.message(UserState.choosing_hotel)
+async def handle_hotel_format(msg: Message, state: FSMContext):
+    text = msg.text.strip() if msg.text else ""
+    if text == "🏠 Главное меню":
+        await state.clear()
+        city = get_user_city(msg.from_user.id)
+        await msg.answer(_send_main_menu_text(city or "—"), reply_markup=MAIN_KB)
+        return
+    if text not in HOTEL_FORMATS:
+        await msg.answer("Выбери формат из кнопок 👇", reply_markup=HOTEL_KB)
+        return
+
+    city = get_user_city(msg.from_user.id)
+    await state.clear()
+    if is_flood(msg.from_user.id):
+        await msg.answer("⏳ Подожди секунду 😊", reply_markup=MAIN_KB)
+        return
+
+    if msg.from_user.id in active_requests:
+        await msg.answer("⏳ Уже обрабатываю предыдущий запрос 😊", reply_markup=MAIN_KB)
+        return
+
+    thinking = await msg.answer(f"🏨 Ищу варианты в {city}...")
+    active_requests.add(msg.from_user.id)
+    try:
+        raw = await ask_hotels(city, text)
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        hotel_category = f"Отели: {text}"
+        parsed, _, resp_type = parse_gpt_response(raw, city)
+        full_text = f"🏨 Где остановиться в {city} — {text}\n\n━━━━━━━━━━━━━━━\n\n" + parsed + BACK_TEXT
+
+        await send_long(msg, full_text, reply_markup=MAIN_KB, disable_web_page_preview=True)
+
+        # Реакция только если парсинг успешен (не error)
+        if resp_type in ("places", "single"):
+            rid = new_response_id()
+            save_response_meta(rid, msg.from_user.id, city, hotel_category)
+            await msg.answer("Помогло?", reply_markup=feedback_kb(rid))
+
+        increment_requests(msg.from_user.id)
+        asyncio.create_task(log_sheets(
+            msg.from_user.id, full_name(msg.from_user),
+            msg.from_user.username, hotel_category, f"🏨 {text} в {city}", len(raw)))
+    except Exception as e:
+        logging.error(f"Hotels error: {e}")
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+        await msg.answer("Что-то пошло не так. Попробуй ещё раз." + BACK_TEXT, reply_markup=MAIN_KB)
+    finally:
+        active_requests.discard(msg.from_user.id)
+
+# ──────────────────────────────────────────────────────────────
+# СИСТЕМНЫЕ КНОПКИ
+# ──────────────────────────────────────────────────────────────
 @dp.message(F.text == "🏠 Главное меню")
 async def btn_main_menu(msg: Message, state: FSMContext):
     await state.clear()
-    user = msg.from_user
-    city, city_key = get_user_city(user.id)
+    city = get_user_city(msg.from_user.id)
+    if not city:
+        await msg.answer("Напиши название города 🏙", reply_markup=CITY_INPUT_KB)
+        await state.set_state(UserState.entering_city)
+        return
+    await msg.answer(_send_main_menu_text(city), reply_markup=MAIN_KB)
+
+
+@dp.message(F.text == "➕ Ещё")
+async def btn_more(msg: Message):
+    city = get_user_city(msg.from_user.id)
+    header = f"🏙 Сейчас: {city}\n" if city else ""
+    await msg.answer(f"{header}━━━━━━━━━━━━━━━\nВсе категории 👇", reply_markup=MORE_KB)
+
+
+@dp.message(F.text == "✏️ Свой вопрос")
+async def btn_own(msg: Message):
+    city = get_user_city(msg.from_user.id)
+    if not city:
+        await msg.answer("Сначала выбери город 🏙", reply_markup=CITY_INPUT_KB)
+        return
     await msg.answer(
-        f"🏠 Главное меню\n\n"
+        f"✏️ Свой вопрос\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"🏙 Твой город: {city_key}\n"
-        f"━━━━━━━━━━━━━━━\n\n"
-        f"🗺 Что найдём сегодня? Жми кнопку или пиши 👇",
+        f"Пиши любой вопрос про {city}!\n\n"
+        f"Например:\n"
+        f"— Где недорого поесть возле вокзала?\n"
+        f"— Куда пойти вечером вдвоём?\n"
+        f"— Что посмотреть за 4 часа?",
         reply_markup=MAIN_KB,
-        disable_web_page_preview=True,
-    )
-
-
-@dp.message(F.text == "🏙 Сменить город")
-async def change_city(msg: Message, state: FSMContext):
-    await msg.answer(
-        "🏙 Смена города!\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "Выбери новый город 👇",
-        reply_markup=CITY_KEYBOARD,
-    )
-    await state.set_state(UserState.choosing_city)
-
-
-@dp.message(F.text == "🔔 Утренние сообщения")
-async def btn_morning_toggle(msg: Message):
-    new_status = toggle_morning(msg.from_user.id)
-    if new_status:
-        await msg.answer(
-            "🔔 Утренние сообщения включены!\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "☀️ Каждый день в 9:00 тебя будет ждать:\n"
-            "🏛 Интересный факт о твоём городе\n"
-            "🔮 Персональный гороскоп на день\n"
-            "━━━━━━━━━━━━━━━\n\n"
-            "✨ Что ещё найдём? Жми или пиши 👇",
-            reply_markup=MAIN_KB,
-        )
-    else:
-        await msg.answer(
-            "🔕 Утренние сообщения отключены\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "Когда захочешь вернуть — нажми кнопку снова 👌\n"
-            "━━━━━━━━━━━━━━━\n\n"
-            "✨ Что ещё найдём? Жми или пиши 👇",
-            reply_markup=MAIN_KB,
-        )
-
-
-@dp.message(Command("help"))
-async def cmd_help(msg: Message):
-    await msg.answer(
-        "🗺 Как пользоваться AI Местным\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "🔘 Жми кнопку с темой — получишь подборку мест\n"
-        "✏️ Или пиши обычным языком — чем больше деталей тем точнее ответ\n"
-        "🏙 Смени город кнопкой Сменить город\n"
-        "☀️ Каждое утро в 9:00 — факт о городе и гороскоп\n"
-        "📸 Скинь фото места — попробую определить что это\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "📌 Команды:\n"
-        "/zodiac — сменить знак зодиака\n"
-        "/start — главное меню\n"
-        "/about — о проекте",
-        reply_markup=MAIN_KB,
-    )
-
-
-@dp.message(Command("about"))
-async def cmd_about(msg: Message):
-    await _send_about(msg)
-
-
-@dp.message(F.text == "ℹ️ О проекте")
-async def btn_about(msg: Message):
-    await _send_about(msg)
-
-
-async def _send_about(msg: Message):
-    await msg.answer(
-        "🗺 AI Местный — твой городской гид\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "🏘 Показываю города глазами тех, кто там живёт:\n\n"
-        "📍 Места которых нет в топе Google Maps\n"
-        "🍽 Кафе куда ходят местные, а не туристы\n"
-        "🎭 События о которых узнают за день\n"
-        "🗺 Маршруты без толпы\n"
-        "📸 Определяю места по фото\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "🏙 Города:\n"
-        "🌊 Сочи • 🏙 Москва • 🏛 Петербург • 🕌 Казань\n"
-        "🌿 Краснодар • 🌅 Калининград • 💎 Екатеринбург\n"
-        "🏯 Нижний Новгород • ⛵ Геленджик • 🏖 Крым\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "💡 Замечания и идеи — жми Поддержка\n\n"
-        "✨ Что ещё найдём? Жми или пиши 👇",
-        reply_markup=MAIN_KB,
-        disable_web_page_preview=True,
     )
 
 
 @dp.message(F.text == "🛠 Поддержка")
 async def btn_support(msg: Message):
-    user  = msg.from_user
-    city, _ = get_user_city(user.id)
     await msg.answer(
         "🛠 Поддержка\n\n"
         "━━━━━━━━━━━━━━━\n"
         "💬 Напиши замечание или идею — читаю всё!\n\n"
-        "📩 Или пиши напрямую создателю: @demo23rus\n"
+        "📩 Пиши напрямую: @demo23rus\n"
         "━━━━━━━━━━━━━━━\n\n"
         "✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
     )
 
 
-@dp.message(F.text == "✏️ Свой вопрос")
-async def btn_own(msg: Message):
-    city, _ = get_user_city(msg.from_user.id)
+@dp.message(F.text == "ℹ️ О проекте")
+async def btn_about(msg: Message):
     await msg.answer(
-        f"✏️ Свой вопрос\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🗺 Пиши любой вопрос про {city}!\n"
-        f"Чем больше деталей — тем точнее ответ 🚀",
+        "🗺 AI Местный — гид по городам России\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Помогаю находить идеи для поездок:\n\n"
+        "🍽 Где поесть и выпить кофе\n"
+        "🗺 Маршруты на день\n"
+        "🏨 Варианты жилья под твой формат\n"
+        "🎭 Куда сходить и что посмотреть\n"
+        "💎 Места куда редко доходят туристы\n"
+        "📸 Определяю места по фото\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "🇷🇺 Работаю по всем городам и курортам России\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "💡 Идеи и замечания — жми Поддержка 👇",
         reply_markup=MAIN_KB,
+        disable_web_page_preview=True,
     )
 
 
@@ -951,7 +1517,7 @@ async def btn_review(msg: Message, state: FSMContext):
     await msg.answer(
         "💬 Оставить отзыв\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "🙏 Напиши свой отзыв или пожелание — читаю всё и учитываю!\n\n"
+        "🙏 Напиши свой отзыв или пожелание!\n\n"
         "💡 Что понравилось?\n"
         "🔧 Что можно улучшить?\n"
         "✨ Чего не хватает?\n"
@@ -969,26 +1535,68 @@ async def handle_review(msg: Message, state: FSMContext):
     text = msg.text.strip() if msg.text else ""
     if text == "❌ Отмена":
         await state.clear()
-        await msg.answer(
-            "👌 Хорошо, в другой раз!\n\n✨ Что ещё найдём? Жми или пиши 👇",
-            reply_markup=MAIN_KB,
-        )
+        await msg.answer("👌 В другой раз!\n\n✨ Что ещё найдём? Жми или пиши 👇", reply_markup=MAIN_KB)
         return
-    user    = msg.from_user
-    city, _ = get_user_city(user.id)
+    user = msg.from_user
+    city = get_user_city(user.id)
     await state.clear()
     await msg.answer(
         "🙏 Спасибо за отзыв!\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "💪 Это очень помогает делать бота лучше!\n"
+        "💪 Это помогает делать бота лучше!\n"
         "━━━━━━━━━━━━━━━\n\n"
         "✨ Что ещё найдём? Жми или пиши 👇",
         reply_markup=MAIN_KB,
     )
-    asyncio.create_task(log_review(user.id, full_name(user), user.username, city, text))
+    asyncio.create_task(log_review(user.id, full_name(user), user.username, city or "—", text))
+
+# ──────────────────────────────────────────────────────────────
+# КОМАНДЫ
+# ──────────────────────────────────────────────────────────────
+@dp.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    if msg.from_user.id != OWNER_ID:
+        return
+    total, top_cities, active_today, total_req, no_city, pos, neg = get_stats()
+    cities_text = "\n".join([f"  {c}: {n} чел." for c, n in top_cities])
+    await msg.answer(
+        f"📊 Статистика AI Местный v6\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👥 Пользователей: {total}\n"
+        f"🏙 Без города: {no_city}\n"
+        f"🟢 Активны сегодня: {active_today}\n"
+        f"💬 Всего запросов: {total_req}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👍 Положительных: {pos}\n"
+        f"👎 Отрицательных: {neg}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"🏙 Топ городов:\n{cities_text}",
+    )
 
 
-# ── Фото ──────────────────────────────────────────────────────
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
+    await msg.answer(
+        "🗺 Как пользоваться AI Местным\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🏙 Напиши любой город или курорт России\n"
+        "🔘 Жми кнопку — получишь подборку мест\n"
+        "✏️ Пиши свободным текстом\n"
+        "📸 Скинь фото — определю место\n"
+        "🎤 Говори голосом\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "Команды: /start /help /about",
+        reply_markup=MAIN_KB,
+    )
+
+
+@dp.message(Command("about"))
+async def cmd_about(msg: Message):
+    await btn_about(msg)
+
+# ──────────────────────────────────────────────────────────────
+# ОБРАБОТЧИК: фото
+# ──────────────────────────────────────────────────────────────
 @dp.message(F.photo)
 async def handle_photo(msg: Message, state: FSMContext):
     await state.update_data(photo_file_id=msg.photo[-1].file_id)
@@ -997,8 +1605,7 @@ async def handle_photo(msg: Message, state: FSMContext):
         "📸 Вижу фото!\n\n"
         "━━━━━━━━━━━━━━━\n"
         "🔍 Хочешь узнать что это за место?\n"
-        "Или расскажи сам что ищешь 👇\n"
-        "━━━━━━━━━━━━━━━",
+        "Или расскажи сам что ищешь 👇",
         reply_markup=PHOTO_KB,
     )
 
@@ -1008,124 +1615,102 @@ async def handle_identify_place(msg: Message, state: FSMContext):
     data = await state.get_data()
     file_id = data.get("photo_file_id")
     await state.clear()
-
-    city, _ = get_user_city(msg.from_user.id)
-    thinking = await msg.answer(
-        "🔍 Анализирую фото...\n⏳ Подожди немного 🤔",
-        reply_markup=MAIN_KB,
-    )
-
+    city = get_user_city(msg.from_user.id) or "Россия"
+    thinking = await msg.answer("🔍 Анализирую фото...", reply_markup=MAIN_KB)
+    tmp_path = None
     try:
-        # Скачиваем фото
-        file = await bot.get_file(file_id)
+        file     = await bot.get_file(file_id)
         tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp_path = tmp_file.name
         tmp_file.close()
         await bot.download_file(file.file_path, tmp_path)
-
         with open(tmp_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
-
         result = await identify_place(image_data, city)
-
         try:
             await thinking.delete()
         except Exception:
             pass
-
         await msg.answer(
             f"📍 Вот что удалось найти:\n\n"
             f"━━━━━━━━━━━━━━━\n"
             f"{result}\n"
             f"━━━━━━━━━━━━━━━\n\n"
-            f"⚠️ Это предположение на основе фото — проверь по ссылкам на карты.\n\n"
+            f"⚠️ Это предположение по фото — проверь по картам.\n\n"
             f"✨ Что ещё найдём? Жми или пиши 👇",
             reply_markup=MAIN_KB,
             disable_web_page_preview=True,
         )
         increment_requests(msg.from_user.id)
-        asyncio.create_task(log_sheets(
-            msg.from_user.id, full_name(msg.from_user),
-            msg.from_user.username, "Фото место", "🔍 Определить место", len(result)))
     except Exception as e:
         logging.error(f"Photo identify error: {e}")
         try:
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(
-            "😔 Не смог обработать фото.\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "✏️ Попробуй написать название места текстом 👇",
-            reply_markup=MAIN_KB,
-        )
+        await msg.answer("😔 Не смог обработать фото. Напиши название места текстом 👇", reply_markup=MAIN_KB)
     finally:
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
 @dp.message(UserState.waiting_photo_action, F.text == "✏️ Напишу сам")
 async def handle_photo_write_self(msg: Message, state: FSMContext):
     await state.clear()
-    city, _ = get_user_city(msg.from_user.id)
+    city = get_user_city(msg.from_user.id)
     await msg.answer(
-        f"✏️ Отлично!\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🗺 Пиши что ищешь в {city} — найду лучшее 🚀",
+        f"✏️ Пиши что ищешь{' в ' + city if city else ''} 🚀",
         reply_markup=MAIN_KB,
     )
-
 
 @dp.message(UserState.waiting_photo_action)
-async def handle_photo_action_other(msg: Message, state: FSMContext):
+async def handle_photo_other(msg: Message, state: FSMContext):
     await msg.answer("Выбери действие 👇", reply_markup=PHOTO_KB)
 
-
-# ── Видео и другие медиа ──────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# МЕДИА
+# ──────────────────────────────────────────────────────────────
 @dp.message(F.video | F.video_note)
 async def handle_video(msg: Message):
-    city, _ = get_user_city(msg.from_user.id)
+    city = get_user_city(msg.from_user.id)
     await msg.answer(
         f"🎥 Видео пока не поддерживаю!\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"✏️ Напиши что ищешь в {city} — найду лучшее 🗺",
+        f"✏️ Напиши что ищешь{' в ' + city if city else ''} 🗺",
         reply_markup=MAIN_KB,
     )
-
 
 @dp.message(F.sticker)
 async def handle_sticker(msg: Message):
     await msg.answer(
         "😄 Классный стикер!\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "📝 Я понимаю текст, голосовые и фото.\n"
+        "📝 Понимаю текст, голосовые и фото.\n"
         "Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
-
 
 @dp.message(F.document)
 async def handle_document(msg: Message):
     await msg.answer(
         "📄 Документы пока не поддерживаю!\n\n"
-        "━━━━━━━━━━━━━━━\n"
         "✏️ Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
 
-
-# ── Голосовые ─────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# ГОЛОСОВЫЕ (Whisper) — антифлуд ПЕРВЫМ
+# ──────────────────────────────────────────────────────────────
 @dp.message(F.voice)
 async def handle_voice(msg: Message):
-    # Антифлуд проверяем ПЕРВЫМ — чтобы не тратить деньги на Whisper при спаме
     if is_flood(msg.from_user.id):
-        await msg.answer(
-            "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
-            reply_markup=MAIN_KB,
-        )
+        await msg.answer("⏳ Подожди секунду 😊", reply_markup=MAIN_KB)
         return
 
-    await msg.answer("🎤 Распознаю голосовое... подожди немного 😊")
+    if msg.from_user.id in active_requests:
+        await msg.answer("⏳ Уже обрабатываю предыдущий запрос 😊", reply_markup=MAIN_KB)
+        return
+
+    await msg.answer("🎤 Распознаю голосовое...")
+    active_requests.add(msg.from_user.id)
     tmp_path = None
     try:
         file     = await bot.get_file(msg.voice.file_id)
@@ -1138,126 +1723,123 @@ async def handle_voice(msg: Message):
                 model="whisper-1", file=audio, language="ru")
         text = transcript.text.strip()
         if not text:
-            await msg.answer(f"Не смог распознать. Попробуй написать текстом 👇{BACK_TEXT}", reply_markup=MAIN_KB)
+            await msg.answer("Не смог распознать. Напиши текстом 👇" + BACK_TEXT, reply_markup=MAIN_KB)
             return
-
-        city, _ = get_user_city(msg.from_user.id)
-        thinking = await msg.answer(f"Распознал: {text}\n\nИщу в {city}...")
-        answer   = await ask_ai(text, city)
+        city = get_user_city(msg.from_user.id)
+        if not city:
+            await msg.answer(
+                f"Распознал: «{text}»\n\nСначала напиши название города 🏙",
+                reply_markup=CITY_INPUT_KB,
+            )
+            return
+        thinking = await msg.answer(f"Распознал: «{text}»\n\nИщу в {city}...")
+        ctx = get_context(msg.from_user.id)
+        raw = await ask_ai(text, city, ctx)
         try:
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB, disable_web_page_preview=True)
+        # Сохраняем полный raw в контекст
+        add_to_context(msg.from_user.id, "user", text)
+        add_to_context(msg.from_user.id, "assistant", raw)
+        await send_result(msg, raw, city, "Голосовое")
         increment_requests(msg.from_user.id)
         asyncio.create_task(log_sheets(
             msg.from_user.id, full_name(msg.from_user),
-            msg.from_user.username, "Голосовое", f"🎤 {text}", len(answer)))
+            msg.from_user.username, "Голосовое", f"🎤 {text}", len(raw)))
     except Exception as e:
         logging.error(f"Voice error: {e}")
-        await msg.answer(f"Не смог обработать голосовое. Попробуй написать текстом 👇{BACK_TEXT}", reply_markup=MAIN_KB)
+        await msg.answer("Не смог обработать голосовое. Напиши текстом 👇" + BACK_TEXT, reply_markup=MAIN_KB)
     finally:
+        active_requests.discard(msg.from_user.id)
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-
-# ── Текстовые сообщения ───────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# ТЕКСТОВЫЕ СООБЩЕНИЯ — основной обработчик
+# ──────────────────────────────────────────────────────────────
 @dp.message(F.text)
 async def handle_text(msg: Message, state: FSMContext):
     text = msg.text.strip() if msg.text else ""
 
-    # Игнорируем служебные кнопки и кнопки городов
-    if (text in SYSTEM_BUTTONS or text in ALL_CITY_BUTTONS or
-            text in ZODIAC_SIGNS or text == "⏭ Пропустить" or
-            text == "❌ Отмена"):
+    if text in SYSTEM_BUTTONS:
         return
 
     user = msg.from_user
 
-    # Короткие фразы — без GPT
     short_reply = SHORT_REPLIES.get(text.lower())
     if short_reply:
         await msg.answer(short_reply, reply_markup=MAIN_KB)
         return
 
-    # Антифлуд
-    if is_flood(user.id):
+    city = get_user_city(user.id)
+    if not city:
         await msg.answer(
-            "⏳ Подожди секунду — обрабатываю предыдущий запрос 😊",
-            reply_markup=MAIN_KB,
+            "Сначала напиши название города 🏙",
+            reply_markup=CITY_INPUT_KB,
         )
+        await state.set_state(UserState.entering_city)
         return
 
-    city, _  = get_user_city(user.id)
-    msg_type = "Кнопка тематическая" if text in THEME_BUTTONS else "Свободный запрос"
-    thinking = await msg.answer(f"Ищу в {city}...")
+    if is_flood(user.id):
+        await msg.answer("⏳ Подожди секунду 😊", reply_markup=MAIN_KB)
+        return
+
+    if user.id in active_requests:
+        await msg.answer("⏳ Уже обрабатываю твой предыдущий запрос — подожди немного 😊", reply_markup=MAIN_KB)
+        return
+
+    is_theme  = text in THEME_BUTTONS
+    category  = text if is_theme else "Свободный запрос"
+    thinking  = await msg.answer(f"Ищу в {city}...")
+    active_requests.add(user.id)
     try:
-        answer = await ask_ai(text, city)
+        ctx = get_context(user.id)
+        raw = await ask_ai(text, city, ctx)
         try:
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(answer + BACK_TEXT, reply_markup=MAIN_KB, disable_web_page_preview=True)
+
+        # Сохраняем полный raw в контекст — модель видит правильный JSON-формат
+        add_to_context(user.id, "user", text)
+        add_to_context(user.id, "assistant", raw)
+
+        await send_result(msg, raw, city, category, with_feedback=True)
         increment_requests(user.id)
         asyncio.create_task(log_sheets(
-            user.id, full_name(user), user.username, msg_type, text, len(answer)))
+            user.id, full_name(user), user.username, category, text, len(raw)))
     except Exception as e:
         logging.error(f"Text error: {e}")
         try:
             await thinking.delete()
         except Exception:
             pass
-        await msg.answer(f"Что-то пошло не так. Попробуй ещё раз.{BACK_TEXT}", reply_markup=MAIN_KB)
+        await msg.answer("Что-то пошло не так. Попробуй ещё раз." + BACK_TEXT, reply_markup=MAIN_KB)
+    finally:
+        active_requests.discard(user.id)
 
-
-# ── Всё остальное ─────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# FALLBACK
+# ──────────────────────────────────────────────────────────────
 @dp.message()
 async def fallback(msg: Message):
     await msg.answer(
         "🤔 Не совсем понял!\n\n"
-        "━━━━━━━━━━━━━━━\n"
-        "📝 Я понимаю текст, голосовые и фото.\n"
+        "📝 Понимаю текст, голосовые и фото.\n"
         "Напиши что ищешь или жми кнопку 👇",
         reply_markup=MAIN_KB,
     )
-
-
-# ──────────────────────────────────────────────────────────────
-# ЗАЩИТА ОТ ВТОРОГО ЭКЗЕМПЛЯРА
-# ──────────────────────────────────────────────────────────────
-_lock_handle = None
-
-def acquire_single_instance_lock():
-    """
-    Не даёт запустить второй экземпляр бота на ЭТОМ сервере.
-    Если бот уже работает здесь — новый процесс сразу завершится,
-    и утренняя рассылка не задвоится.
-    ВНИМАНИЕ: это НЕ защищает от запуска на ДРУГОМ сервере (там свой /tmp).
-    Если дубль из-за двух серверов — нужно остановить бота на старом сервере.
-    """
-    global _lock_handle
-    _lock_handle = open("/tmp/mestniy_bot.lock", "w")
-    try:
-        fcntl.flock(_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
-        logging.error("❌ Бот уже запущен в другом процессе на этом сервере. Завершаюсь.")
-        sys.exit(1)
-    _lock_handle.write(str(os.getpid()))
-    _lock_handle.flush()
-
 
 # ──────────────────────────────────────────────────────────────
 # ЗАПУСК
 # ──────────────────────────────────────────────────────────────
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    acquire_single_instance_lock()  # гарантия: один экземпляр на сервер
+    acquire_single_instance_lock()
     init_db()
-    logging.info("AI Местный v5 запущен")
-    asyncio.create_task(morning_scheduler())
-    # drop_pending_updates — не отвечать на сообщения, накопившиеся пока бот был выключен
+    logging.info("AI Местный v6.0 запущен")
     await dp.start_polling(bot, drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
