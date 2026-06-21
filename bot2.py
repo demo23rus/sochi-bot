@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    Message, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 from aiogram.fsm.context import FSMContext
@@ -1899,8 +1899,6 @@ async def cmd_start(msg: Message, state: FSMContext):
     save_user(user.id, name, user.username, ref_by=ref_by)
 
     if existing and existing["city"]:
-        active_trip = get_active_trip(user.id)
-        city = active_trip["city"] if active_trip else existing["city"]
         await msg.answer(f"👋 С возвращением, {user.first_name or 'друг'}!")
         await show_v7_main_menu(msg, user.id)
         return
@@ -2330,6 +2328,9 @@ async def cb_trip_confirm(cq: CallbackQuery, state: FSMContext):
     update_trip(trip_id,cq.from_user.id,status="planning",plan_generation_status="not_started")
     select_active_trip(cq.from_user.id,trip_id); await state.clear()
     log_analytics_event("trip_onboarding_completed",user_id=cq.from_user.id,trip_id=trip_id,event_data={"city":trip["city"],"days":trip["days_count"]})
+    # Inline-кнопки не заменяют старую reply-клавиатуру шага «Пожелания».
+    # Сразу возвращаем постоянное меню активной поездки.
+    await cq.message.answer("Меню поездки открыто 👇", reply_markup=ACTIVE_TRIP_KB)
     await cq.message.answer(
         f"✅ <b>Поездка в {html.escape(trip['city'])} создана</b>\n\nПрофиль сохранён. Теперь соберу персональный план по дням с логичной географией, темпом и вариантами под твои интересы.",
         parse_mode="HTML",
@@ -2789,7 +2790,8 @@ def _trip_plan_prompt(trip) -> str:
         {{
           "start_time": "09:00",
           "end_time": "10:00",
-          "name": "Название места или активности",
+          "name": "Точное официальное название места либо понятное название общей активности",
+          "item_kind": "place|activity",
           "category": "завтрак|достопримечательность|прогулка|обед|музей|ужин|отдых|другое",
           "address": "Район или ориентир; не выдумывай точный адрес",
           "estimated_cost": "Доступно|Средне|Выше среднего|Бесплатно",
@@ -2812,7 +2814,11 @@ def _trip_plan_prompt(trip) -> str:
 - Не повторяй одно место в разные дни без веской причины.
 - Учитывай состав, детей, темп, бюджет, транспорт и жильё.
 - Не указывай конкретные цены в рублях, телефоны и непроверенные часы работы.
-- Лучше дать известные и правдоподобные места, чем выдуманные.
+- Для item_kind="place" указывай только конкретное реально существующее место с официальным названием, которое можно найти на картах.
+- Нельзя выдавать общие формулировки вроде «семейный ресторан», «кафе с видом», «музей истории города» или «пляж» за конкретное место.
+- Если точное место неизвестно или пользователь должен выбрать его сам, ставь item_kind="activity" и давай честное название активности: «Завтрак рядом с жильём», «Свободное время на пляже».
+- Для activity не притворяйся, что известен точный адрес.
+- Лучше дать меньше конкретных мест, чем выдумать заведение.
 - Для маленького города допускаются активности без конкретного заведения.
 """
 
@@ -2914,6 +2920,15 @@ def validate_trip_plan(raw: str, expected_days: int) -> dict:
             if not item.get("is_backup"):
                 seen_names.add(key)
             item["name"] = name[:250]
+            item_kind = str(item.get("item_kind") or "").strip().lower()
+            if item_kind not in ("place", "activity"):
+                generic_markers = (
+                    "кафе с", "семейный ресторан", "ресторан с", "музей истории города",
+                    "отдых на пляже", "прогулка по", "завтрак", "обед", "ужин",
+                    "свободное время", "поездка к", "экскурсия в музей"
+                )
+                item_kind = "activity" if any(marker in name.casefold() for marker in generic_markers) else "place"
+            item["item_kind"] = item_kind
             item["start_time"] = start_time
             item["end_time"] = str(item.get("end_time", ""))[:5]
             item["travel_minutes"] = max(0, min(int(item.get("travel_minutes") or 0), 300))
@@ -2975,7 +2990,7 @@ def save_trip_plan(trip_id: int, user_id: int, plan: dict):
                 """, (
                     trip_id, day_id, str(item.get("name", ""))[:250],
                     str(item.get("start_time", ""))[:5], str(item.get("end_time", ""))[:5],
-                    position, str(item.get("category", "place"))[:80],
+                    position, str(item.get("item_kind", "place"))[:80],
                     str(item.get("transport_to_next", ""))[:100], item.get("travel_minutes", 0),
                     str(item.get("estimated_cost", ""))[:100],
                     str(item.get("personal_reason", ""))[:1200], str(item.get("ai_tip", ""))[:1200],
@@ -3238,7 +3253,7 @@ def _replace_item_sync(item: sqlite3.Row, trip: sqlite3.Row, other_names: list[s
 
 Верни ТОЛЬКО JSON:
 {{
-  "name": "новое реальное место",
+  "name": "точное официальное название нового реального места",
   "category": "категория",
   "personal_reason": "почему подходит именно этой поездке",
   "ai_tip": "практический совет",
@@ -3283,7 +3298,7 @@ async def replace_trip_item_ai(item_id: int, user_id: int) -> bool:
                 estimated_cost=?, transport_to_next=?, travel_minutes=?, updated_at=?
             WHERE item_id=?
         """, (
-            str(data.get("name", ""))[:250], str(data.get("category", "place"))[:80],
+            str(data.get("name", ""))[:250], "place",
             str(data.get("personal_reason", ""))[:1200], str(data.get("ai_tip", ""))[:1200],
             str(data.get("estimated_cost", ""))[:100], str(data.get("transport_to_next", ""))[:100],
             max(0, min(int(data.get("travel_minutes") or 0), 240)), now, item_id,
@@ -3298,6 +3313,34 @@ def trip_plan_kb(trip_id: int, days) -> InlineKeyboardMarkup:
     )] for day in days]
     rows.append([InlineKeyboardButton(text="🔄 Создать план заново", callback_data=f"trip_regenerate:{trip_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К поездке", callback_data=f"trip_open:{trip_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _item_is_specific_place(item) -> bool:
+    """Не показывает фиктивные карты для общих активностей."""
+    if (item["item_type"] or "").lower() == "activity":
+        return False
+    name = (item["custom_place_name"] or "").strip().casefold()
+    generic_markers = (
+        "кафе с видом", "семейный ресторан", "ресторан с видом",
+        "музей истории города", "отдых на пляже", "свободное время",
+        "завтрак рядом", "обед рядом", "ужин рядом", "прогулка по"
+    )
+    return bool(name) and not any(marker in name for marker in generic_markers)
+
+
+def _day_manage_kb(day, items) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items:
+        label = str(item["custom_place_name"] or "Место")[:28]
+        rows.append([InlineKeyboardButton(
+            text=f"✏️ {label}", callback_data=f"item_manage:{item['item_id']}"
+        )])
+    rows.extend([
+        [InlineKeyboardButton(text="➕ Добавить место", callback_data=f"item_add:{day['day_id']}")],
+        [InlineKeyboardButton(text="⬅️ Ко всем дням", callback_data=f"trip_plan:{day['trip_id']}")],
+        [InlineKeyboardButton(text="✈️ К поездке", callback_data=f"trip_open:{day['trip_id']}")],
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -3318,11 +3361,30 @@ def _day_text(day, items) -> str:
         )
         if item["travel_minutes"]:
             block += f"\n🚶 До следующей точки: около {item['travel_minutes']} мин."
-        block += f"\n{make_map_links(item['custom_place_name'] or '', day['city'])}"
+        if _item_is_specific_place(item):
+            block += f"\n{make_map_links(item['custom_place_name'] or '', day['city'])}"
+        else:
+            block += "\n📍 Это общая активность — выбери подходящее место рядом по ситуации."
         blocks.append(block)
     if day["notes"]:
         blocks.append(f"ℹ️ {html.escape(day['notes'])}")
     return "\n\n".join(x for x in blocks if x)
+
+
+async def show_trip_day(message: Message, day_id: int, user_id: int, *, notice: str | None = None) -> bool:
+    """Единый показ дня после открытия и любых изменений маршрута."""
+    day = get_trip_day(day_id, user_id)
+    if not day:
+        await message.answer("День не найден.", reply_markup=main_kb_for(user_id))
+        return False
+    items = get_day_items(day_id, user_id)
+    if notice:
+        await message.answer(notice, reply_markup=ACTIVE_TRIP_KB)
+    await send_long(
+        message, _day_text(day, items), parse_mode="HTML",
+        reply_markup=_day_manage_kb(day, items),
+    )
+    return True
 
 
 async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regenerate: bool = False):
@@ -3358,6 +3420,8 @@ async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regener
         except Exception: pass
         days = get_trip_days(trip_id, user_id)
         concept = html.escape(plan.get("concept", ""))
+        # Убираем клавиатуру «Пропустить / Отмена», оставшуюся от онбординга.
+        await msg.answer("План готов. Управление поездкой — в меню ниже 👇", reply_markup=ACTIVE_TRIP_KB)
         await msg.answer(
             f"✅ <b>План поездки готов</b>\n\n{concept}\n\nВыбери день, чтобы открыть подробный маршрут:",
             parse_mode="HTML", reply_markup=trip_plan_kb(trip_id, days)
@@ -3417,22 +3481,10 @@ async def cb_trip_day(cq: CallbackQuery):
     except Exception: await cq.answer("Некорректный день", show_alert=True); return
     day = get_trip_day(day_id, cq.from_user.id)
     if not day: await cq.answer("День не найден", show_alert=True); return
-    items = get_day_items(day_id, cq.from_user.id)
-    rows = []
-    for item in items:
-        label = str(item["custom_place_name"] or "Место")[:28]
-        rows.append([
-            InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"item_manage:{item['item_id']}")
-        ])
-    rows.extend([
-        [InlineKeyboardButton(text="➕ Добавить место", callback_data=f"item_add:{day_id}")],
-        [InlineKeyboardButton(text="⬅️ Ко всем дням", callback_data=f"trip_plan:{day['trip_id']}")],
-        [InlineKeyboardButton(text="✈️ К поездке", callback_data=f"trip_open:{day['trip_id']}")],
-    ])
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await send_long(cq.message, _day_text(day, items), parse_mode="HTML", reply_markup=kb)
+    await show_trip_day(cq.message, day_id, cq.from_user.id)
     log_analytics_event("trip_day_opened", user_id=cq.from_user.id, trip_id=day["trip_id"], event_data={"day": day["day_number"]})
     await cq.answer()
+
 
 @dp.callback_query(F.data.startswith("trip_saved:"))
 async def cb_trip_saved(cq: CallbackQuery):
@@ -3515,11 +3567,8 @@ async def cb_item_delete(cq: CallbackQuery):
     if not ok: await cq.answer("Место не найдено", show_alert=True); return
     log_analytics_event("trip_item_deleted", user_id=cq.from_user.id, trip_id=trip_id)
     await cq.answer("Удалено")
-    day = get_trip_day(day_id, cq.from_user.id) if day_id else None
-    if day:
-        items = get_day_items(day_id, cq.from_user.id)
-        await cq.message.answer("✅ Маршрут обновлён.")
-        await cq.message.answer(_day_text(day, items), parse_mode="HTML")
+    if day_id:
+        await show_trip_day(cq.message, day_id, cq.from_user.id, notice="✅ Маршрут обновлён.")
 
 
 @dp.callback_query(F.data.startswith("item_replace:"))
@@ -3539,14 +3588,9 @@ async def cb_item_replace(cq: CallbackQuery):
         log_analytics_event("trip_item_replaced", user_id=cq.from_user.id, trip_id=updated["trip_id"] if updated else None)
         try: await thinking.delete()
         except Exception: pass
-        await cq.message.answer(
-            f"✅ Заменил на <b>{html.escape(updated['custom_place_name'])}</b>\n\n"
-            f"{html.escape(updated['personal_reason'] or '')}\n\n"
-            f"{make_map_links(updated['custom_place_name'], updated['city'])}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Открыть день", callback_data=f"trip_day:{updated['day_id']}")]
-            ]),
+        await show_trip_day(
+            cq.message, updated["day_id"], cq.from_user.id,
+            notice=f"✅ Заменил на {updated['custom_place_name']}."
         )
     except Exception as e:
         logging.exception(f"Replace item error: {e}")
@@ -3587,11 +3631,9 @@ async def cb_item_move(cq: CallbackQuery):
     item = get_trip_item(item_id, cq.from_user.id)
     log_analytics_event("trip_item_moved", user_id=cq.from_user.id, trip_id=item["trip_id"] if item else None)
     await cq.answer("Перенесено", show_alert=True)
-    await cq.message.answer(
-        f"✅ Место перенесено в день {item['day_number']}.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть день", callback_data=f"trip_day:{day_id}")]
-        ]),
+    await show_trip_day(
+        cq.message, day_id, cq.from_user.id,
+        notice=f"✅ Место перенесено в день {item['day_number']}."
     )
 
 
@@ -3625,11 +3667,9 @@ async def handle_trip_adding_place(msg: Message, state: FSMContext):
         return
     item = get_trip_item(item_id, msg.from_user.id)
     log_analytics_event("trip_item_added", user_id=msg.from_user.id, trip_id=item["trip_id"] if item else None)
-    await msg.answer(
-        f"✅ «{html.escape(text)}» добавлено в маршрут.",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть день", callback_data=f"trip_day:{day_id}")]
-        ]),
+    await show_trip_day(
+        msg, day_id, msg.from_user.id,
+        notice=f"✅ «{text}» добавлено в маршрут."
     )
 
 
@@ -3703,8 +3743,9 @@ async def cb_trip_restore(cq: CallbackQuery):
     if not trip_id: await cq.answer("Версия не найдена", show_alert=True); return
     log_analytics_event("trip_version_restored", user_id=cq.from_user.id, trip_id=trip_id)
     await cq.answer("Версия восстановлена", show_alert=True)
+    await cq.message.answer("✅ Предыдущая версия маршрута восстановлена.", reply_markup=ACTIVE_TRIP_KB)
     await cq.message.answer(
-        "✅ Предыдущая версия маршрута восстановлена.",
+        "Открой восстановленный план:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Открыть план", callback_data=f"trip_plan:{trip_id}")]
         ]),
@@ -4576,7 +4617,7 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     acquire_single_instance_lock()
     init_db()
-    logging.info("AI Местный v7 stage 4 запущен")
+    logging.info("AI Местный v7.1 UX Fix запущен")
     await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
