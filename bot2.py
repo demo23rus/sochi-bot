@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,
+    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 from aiogram.fsm.context import FSMContext
@@ -1811,6 +1811,22 @@ def _send_main_menu_text(city: str) -> str:
         f"Жми кнопку или пиши что ищешь 👇"
     )
 
+
+async def send_inline_step(message: Message, text: str, inline_markup: InlineKeyboardMarkup,
+                           parse_mode: str | None = None) -> Message:
+    """Убирает старую reply-клавиатуру и превращает это же сообщение в inline-экран."""
+    sent = await message.answer(
+        text,
+        parse_mode=parse_mode,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    try:
+        await sent.edit_reply_markup(reply_markup=inline_markup)
+    except Exception as error:
+        logging.warning(f"Inline keyboard attach failed: {error}")
+        await message.answer(text, parse_mode=parse_mode, reply_markup=inline_markup)
+    return sent
+
 # ──────────────────────────────────────────────────────────────
 # V7: ДИНАМИЧЕСКОЕ МЕНЮ И КОНТЕКСТ АКТИВНОЙ ПОЕЗДКИ
 # ──────────────────────────────────────────────────────────────
@@ -2053,7 +2069,11 @@ async def _resume_trip_onboarding(msg: Message, state: FSMContext, trip_id: int)
         await msg.answer("🚕 Как планируешь передвигаться?", reply_markup=TRIP_TRANSPORT_KB)
     elif not _json_list_basic(trip["interests_json"]):
         await state.set_state(UserState.trip_choosing_interests)
-        await msg.answer("🎯 Что особенно интересно? Можно выбрать несколько вариантов.", reply_markup=interests_inline_kb())
+        await send_inline_step(
+            msg,
+            "🎯 Что особенно интересно? Можно выбрать несколько вариантов.",
+            interests_inline_kb(),
+        )
     elif not trip["accommodation_address"] and not trip["accommodation_name"]:
         await state.set_state(UserState.trip_choosing_accommodation)
         await msg.answer("🏨 Уже знаешь, где остановишься?", reply_markup=TRIP_ACCOMMODATION_KB)
@@ -2062,11 +2082,17 @@ async def _resume_trip_onboarding(msg: Message, state: FSMContext, trip_id: int)
         await msg.answer("📝 Есть важные пожелания или ограничения?", reply_markup=TRIP_SKIP_KB)
     else:
         await state.set_state(UserState.trip_confirming)
-        await msg.answer(_trip_summary(trip) + "\n\nВсё верно?", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✨ Подтвердить поездку", callback_data=f"trip_confirm:{trip_id}")],
             [InlineKeyboardButton(text="✏️ Заполнить заново", callback_data=f"trip_restart:{trip_id}")],
             [InlineKeyboardButton(text="❌ Остановиться", callback_data="trip_onboarding_cancel")],
-        ]))
+        ])
+        await send_inline_step(
+            msg,
+            _trip_summary(trip) + "\n\nВсё верно?",
+            confirm_kb,
+            parse_mode="HTML",
+        )
 
 
 @dp.message(F.text == "➕ Новая поездка")
@@ -2246,7 +2272,11 @@ async def handle_trip_transport(msg: Message, state: FSMContext):
     if text not in allowed: await msg.answer("Выбери вариант кнопкой 👇", reply_markup=TRIP_TRANSPORT_KB); return
     trip_id=(await state.get_data()).get("onboarding_trip_id"); update_trip(trip_id,msg.from_user.id,transport_json=json.dumps([allowed[text]],ensure_ascii=False))
     await state.update_data(selected_interests=[]); await state.set_state(UserState.trip_choosing_interests)
-    await msg.answer("🎯 Что особенно интересно? Можно выбрать несколько вариантов.", reply_markup=interests_inline_kb())
+    await send_inline_step(
+        msg,
+        "🎯 Что особенно интересно? Можно выбрать несколько вариантов.",
+        interests_inline_kb(),
+    )
 
 
 @dp.callback_query(F.data.startswith("trip_interest:"))
@@ -2314,11 +2344,17 @@ async def handle_trip_special(msg: Message, state: FSMContext):
     trip_id=(await state.get_data()).get("onboarding_trip_id")
     update_trip(trip_id,msg.from_user.id,special_requests=("" if text=="Пропустить" else text[:1000]))
     trip=get_trip(trip_id,msg.from_user.id); await state.set_state(UserState.trip_confirming)
-    await msg.answer(_trip_summary(trip)+"\n\nВсё верно?", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Подтвердить поездку", callback_data=f"trip_confirm:{trip_id}")],
         [InlineKeyboardButton(text="✏️ Заполнить заново", callback_data=f"trip_restart:{trip_id}")],
         [InlineKeyboardButton(text="❌ Остановиться", callback_data="trip_onboarding_cancel")],
-    ]))
+    ])
+    await send_inline_step(
+        msg,
+        _trip_summary(trip)+"\n\nВсё верно?",
+        confirm_kb,
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(F.data.startswith("trip_confirm:"))
