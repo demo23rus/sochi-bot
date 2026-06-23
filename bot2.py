@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-AI Местный — персональный консьерж по России v7.0
+AI Местный — персональный консьерж по путешествиям v8.0 World
 Bot: @mestniy_guide_bot
 File: /root/bot2.py
 Service: sochi-test
 
-Финальная сборка V7.0:
-- Свободный ввод любого города России текстом
+Сборка V8.0 World:
+- Свободный ввод любого города и курорта мира
 - GPT отвечает JSON → Python строит ссылки программно
 - Контекст диалога (последние 4 сообщения на пользователя)
 - Одноимённые города — уточнение региона
@@ -374,7 +374,7 @@ route_history: dict[int, list] = {}
 # ──────────────────────────────────────────────────────────────
 # БАЗА ДАННЫХ V7 — МИГРАЦИИ И РЕПОЗИТОРИИ
 # ──────────────────────────────────────────────────────────────
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @contextmanager
@@ -472,8 +472,13 @@ def _create_v7_schema(conn: sqlite3.Connection):
             user_id                 INTEGER NOT NULL,
             title                   TEXT,
             city                    TEXT NOT NULL,
+            country                 TEXT DEFAULT 'Россия',
+            country_code            TEXT DEFAULT 'RU',
             region                  TEXT,
             destination_type        TEXT DEFAULT 'city',
+            currency                TEXT,
+            local_timezone          TEXT,
+            local_language          TEXT,
             start_date              TEXT,
             end_date                TEXT,
             days_count              INTEGER,
@@ -750,11 +755,29 @@ def _apply_v7_migration_1(conn: sqlite3.Connection):
     _mark_migration(conn, 1, "v6_to_v7_core_schema")
 
 
+def _apply_v8_world_migration_2(conn: sqlite3.Connection):
+    """V8 World: международные поля поездки. Безопасно для существующей базы."""
+    if _migration_applied(conn, 2):
+        return
+    for definition in (
+        "country TEXT DEFAULT 'Россия'",
+        "country_code TEXT DEFAULT 'RU'",
+        "currency TEXT DEFAULT NULL",
+        "local_timezone TEXT DEFAULT NULL",
+        "local_language TEXT DEFAULT NULL",
+    ):
+        _add_column_if_missing(conn, "trips", definition)
+    conn.execute("UPDATE trips SET country=COALESCE(NULLIF(country,''), 'Россия')")
+    conn.execute("UPDATE trips SET country_code=COALESCE(NULLIF(country_code,''), 'RU')")
+    _mark_migration(conn, 2, "world_destinations_and_batch_generation")
+
+
 def init_db():
-    """Инициализация V7: схема, миграции, индексы и сохранение данных V6."""
+    """Инициализация V8 World: схема и безопасные миграции."""
     with db_connection() as conn:
         _create_v7_schema(conn)
         _apply_v7_migration_1(conn)
+        _apply_v8_world_migration_2(conn)
 
 
 # ── Пользователи ──────────────────────────────────────────────
@@ -812,7 +835,8 @@ def create_trip(user_id: int, city: str, title: str | None = None,
     """Создаёт черновик поездки. Архитектура сразу поддерживает несколько поездок."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     allowed = {
-        "region", "start_date", "end_date", "days_count", "status",
+        "country", "country_code", "region", "currency", "local_timezone", "local_language",
+        "start_date", "end_date", "days_count", "status",
         "party_type", "adults_count", "children_json", "budget_level",
         "pace", "transport_json", "interests_json", "limitations_json",
         "accommodation_name", "accommodation_address", "accommodation_lat",
@@ -906,7 +930,8 @@ def set_active_trip(user_id: int, trip_id: int | None) -> bool:
 
 def update_trip(trip_id: int, user_id: int, **fields) -> bool:
     allowed = {
-        "title", "city", "region", "destination_type", "start_date", "end_date",
+        "title", "city", "country", "country_code", "region", "destination_type",
+        "currency", "local_timezone", "local_language", "start_date", "end_date",
         "days_count", "status", "party_type", "adults_count", "children_json",
         "budget_level", "pace", "transport_json", "interests_json",
         "limitations_json", "accommodation_name", "accommodation_address",
@@ -1268,12 +1293,18 @@ def clear_context(user_id: int):
 # ──────────────────────────────────────────────────────────────
 # ССЫЛКИ НА КАРТЫ — программное построение
 # ──────────────────────────────────────────────────────────────
-def make_map_links(place_name: str, city: str) -> str:
-    """Формирует компактные HTML-ссылки на Яндекс.Карты и 2ГИС."""
-    query  = urllib.parse.quote(f"{place_name} {city}")
-    yandex = f"https://yandex.ru/maps/?text={query}"
-    gis    = f"https://2gis.ru/search/{query}"
-    return f'🗺 <a href="{yandex}">Яндекс.Карты</a>  ·  <a href="{gis}">2ГИС</a>'
+def make_map_links(place_name: str, city: str, country: str | None = None) -> str:
+    """Россия: Яндекс + 2ГИС. Остальной мир: Google Maps + OpenStreetMap."""
+    location = " ".join(x for x in (place_name, city, country or "") if x).strip()
+    query = urllib.parse.quote(location)
+    country_norm = (country or "Россия").strip().casefold()
+    if country_norm in {"россия", "russia", "российская федерация"}:
+        yandex = f"https://yandex.ru/maps/?text={query}"
+        gis = f"https://2gis.ru/search/{query}"
+        return f'🗺 <a href="{yandex}">Яндекс.Карты</a>  ·  <a href="{gis}">2ГИС</a>'
+    google = f"https://www.google.com/maps/search/?api=1&query={query}"
+    osm = f"https://www.openstreetmap.org/search?query={query}"
+    return f'🗺 <a href="{google}">Google Maps</a>  ·  <a href="{osm}">OpenStreetMap</a>'
 
 # ──────────────────────────────────────────────────────────────
 # РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
@@ -1414,59 +1445,43 @@ async def log_feedback_sheets(response_id, user_id, username, city, category, ra
 # GPT — ОПРЕДЕЛЕНИЕ ГОРОДА
 # ──────────────────────────────────────────────────────────────
 def _detect_city_sync(user_input: str) -> dict:
-    """
-    Статусы:
-    - ok: чёткий российский город/курорт
-    - suggest: опечатка или падежная форма → suggestion
-    - ambiguous: одноимённые города → variants (список строк с регионом)
-    - destination: конкретный курорт, посёлок (Красная Поляна, Домбай, Шерегеш)
-    - region: большой регион без конкретного места (Алтай, Карелия, Дагестан, Байкал)
-    - not_city: не населённый пункт вообще
-    - foreign: иностранный город
-    """
-    prompt = f"""Пользователь ввёл: "{user_input}"
+    """Определяет город/курорт мира и возвращает международные метаданные."""
+    prompt = f"""Пользователь ввёл направление: {json.dumps(user_input, ensure_ascii=False)}.
 
-Определи что это.
-
-Ответь ТОЛЬКО в формате JSON (без markdown, без пояснений):
+Определи конкретный город, курорт, остров или туристическое направление в любой стране мира.
+Ответь ТОЛЬКО валидным JSON без markdown:
 {{
-  "status": "ok"|"suggest"|"ambiguous"|"destination"|"region"|"not_city"|"foreign",
-  "city": "нормализованное название" или null,
-  "suggestion": "исправленный вариант" или null,
-  "variants": ["Вариант 1 (регион)", "Вариант 2 (регион)"] или null
+  "status": "ok"|"suggest"|"ambiguous"|"destination"|"region"|"not_city",
+  "city": "нормализованное русское название" или null,
+  "country": "страна на русском" или null,
+  "country_code": "ISO-2" или null,
+  "region": "регион/провинция/штат" или null,
+  "currency": "код валюты ISO-4217" или null,
+  "timezone": "IANA timezone" или null,
+  "local_language": "основной местный язык" или null,
+  "suggestion": "исправленное направление" или null,
+  "variants": [{{"label":"Город, страна/регион","city":"...","country":"...","country_code":"...","region":"..."}}] или null
 }}
 
 Правила:
-- "ok": явный российский город (Сочи, Казань, Владивосток) — нормализуй
-- "suggest": опечатка или падеж (Сачи→Сочи, питер→Санкт-Петербург, екб→Екатеринбург)
-- "ambiguous": одноимённые города в разных регионах — дай variants с уточнением региона
-  Примеры: Киров, Советск, Красноармейск, Заречный, Александровск
-- "destination": конкретный курорт, посёлок или туристическое место (не крупный город):
-  Красная Поляна, Домбай, Архыз, Шерегеш, Роза Хутор, Лазаревское, Сириус, Адлер, Дивеево
-- "region": большой регион, республика, природный объект без конкретной точки:
-  Алтай, Карелия, Дагестан, Байкал, Камчатка, Кавказ, Крым (без города), Урал
-- "not_city": не населённый пункт (хочу на море, покажи красивые места, хочу в горы)
-- "foreign": иностранный город
-
-Примеры:
-"Сочи" → {{"status":"ok","city":"Сочи","suggestion":null,"variants":null}}
-"Сачи" → {{"status":"suggest","city":null,"suggestion":"Сочи","variants":null}}
-"питер" → {{"status":"suggest","city":null,"suggestion":"Санкт-Петербург","variants":null}}
-"Советск" → {{"status":"ambiguous","city":null,"suggestion":null,"variants":["Советск (Калининградская область)","Советск (Кировская область)"]}}
-"Красная Поляна" → {{"status":"destination","city":"Красная Поляна","suggestion":null,"variants":null}}
-"Алтай" → {{"status":"region","city":"Алтай","suggestion":null,"variants":null}}
-"хочу на море" → {{"status":"not_city","city":null,"suggestion":null,"variants":null}}
-"Барселона" → {{"status":"foreign","city":null,"suggestion":null,"variants":null}}"""
-
+- Анталия → Турция, TR, TRY, Europe/Istanbul, турецкий.
+- Дубай → ОАЭ, AE, AED, Asia/Dubai, арабский.
+- Питер → suggest: Санкт-Петербург, Россия.
+- Для одноимённых городов верни ambiguous и 2-5 объектов variants.
+- Если указан только большой регион/страна без конкретной базы для маршрута, status=region.
+- Если это не направление, status=not_city.
+- Не отклоняй иностранные города.
+"""
     resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,
-        temperature=0,
+        model=MODEL, messages=[{"role": "user", "content": prompt}],
+        max_tokens=450, temperature=0,
     )
-    raw = resp.choices[0].message.content.strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw)
+    raw = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+    data = json.loads(raw)
+    if data.get("status") in ("ok", "destination"):
+        data["country"] = data.get("country") or "Россия"
+        data["country_code"] = (data.get("country_code") or ("RU" if data["country"] == "Россия" else "")).upper()
+    return data
 
 async def detect_city(user_input: str) -> dict:
     loop = asyncio.get_event_loop()
@@ -1512,7 +1527,7 @@ def get_system_prompt(city: str) -> str:
             f"Не выдумывай конкретные даты мероприятий."
         )
 
-    return f"""Ты — AI Местный, гид по городам и направлениям России.
+    return f"""Ты — AI Местный, русскоязычный travel-консьерж по городам и направлениям всего мира.
 
 ГОРОД/НАПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ: {city}
 
@@ -1599,7 +1614,7 @@ async def ask_ai(text: str, city: str, context: list) -> str:
 # ──────────────────────────────────────────────────────────────
 # ПАРСИНГ JSON-ОТВЕТА GPT → ТЕКСТ + ССЫЛКИ
 # ──────────────────────────────────────────────────────────────
-def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
+def parse_gpt_response(raw: str, city: str, country: str | None = None) -> tuple[str, list, str]:
     """
     Парсит JSON-ответ GPT, строит текст с программными ссылками.
     Возвращает (text, place_names, resp_type).
@@ -1645,7 +1660,7 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
                 f"📍 {area}\n"
                 f"{price_emoji} {price}\n"
                 f"✨ {desc}\n"
-                f"{make_map_links(p.get('name', '').strip(), city)}\n"
+                f"{make_map_links(p.get('name', '').strip(), city, country)}\n"
                 f"⚠️ Цены и часы — уточняйте перед визитом"
             )
             parts.append(block)
@@ -1681,7 +1696,7 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
                 f"📍 {area}\n"
                 f"{price_emoji} {price}\n"
                 f"{desc}\n"
-                f"{make_map_links(slot.get('name', '').strip(), city)}"
+                f"{make_map_links(slot.get('name', '').strip(), city, country)}"
             )
             parts.append(block)
         parts.append("━━━━━━━━━━━━━━━")
@@ -1708,7 +1723,7 @@ def parse_gpt_response(raw: str, city: str) -> tuple[str, list, str]:
             f"{price_emoji} {price}\n\n"
             f"{desc}\n\n"
             f"💡 {tip}\n\n"
-            f"{make_map_links(data.get('name', '').strip(), city)}\n"
+            f"{make_map_links(data.get('name', '').strip(), city, country)}\n"
             f"⚠️ Цены и часы — уточняйте перед визитом"
         )
         return text, place_names, resp_type
@@ -1843,7 +1858,7 @@ def active_trip_summary(trip) -> str:
     except Exception:
         interests = []
     return (
-        f"Активная поездка: {trip['city']}. "
+        f"Активная поездка: {trip['city']}, {trip['country'] or 'Россия'}. "
         f"Даты: {trip_period_text(trip)}. "
         f"Состав: {trip['party_type'] or 'не указан'}. "
         f"Бюджет: {trip['budget_level'] or 'не указан'}. "
@@ -1860,7 +1875,7 @@ async def show_v7_main_menu(msg: Message, user_id: int):
     if not trip:
         await msg.answer(
             "🧭 <b>AI Местный</b>\n\n"
-            "Твой персональный консьерж по путешествиям в России.\n\n"
+            "Твой персональный консьерж по путешествиям по России и миру.\n\n"
             "Создай поездку или быстро посмотри интересные места.",
             parse_mode="HTML", reply_markup=NO_TRIP_KB,
         )
@@ -1921,7 +1936,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 
     await msg.answer(
         f"Привет, {user.first_name or 'друг'}! 👋\n\n"
-        f"Я AI Местный — персональный консьерж по путешествиям в России.\n"
+        f"Я AI Местный — персональный консьерж по путешествиям по России и миру.\n"
         f"Помогу создать поездку, собрать план по дням и находить места уже в городе.",
         reply_markup=NO_TRIP_KB,
     )
@@ -2011,7 +2026,7 @@ def _trip_summary(trip) -> str:
     children = _json_list_basic(trip["children_json"])
     return (
         f"✈️ <b>{html.escape(trip['title'] or ('Поездка в ' + trip['city']))}</b>\n\n"
-        f"🏙 {html.escape(trip['city'])}\n"
+        f"🏙 {html.escape(trip['city'])}{' · ' + html.escape(trip['country']) if 'country' in trip.keys() and trip['country'] else ''}\n"
         f"📅 {html.escape(dates)}\n"
         f"👥 {html.escape(trip['party_type'] or '—')}"
         f"{' · дети: ' + html.escape(', '.join(children)) if children else ''}\n"
@@ -2130,7 +2145,17 @@ async def handle_trip_city(msg: Message, state: FSMContext):
     status = result.get("status")
     if status in ("ok", "destination"):
         city = result.get("city") or text
-        trip_id = create_trip(msg.from_user.id, city, destination_type=("destination" if status == "destination" else "city"), status="draft")
+        trip_id = create_trip(
+            msg.from_user.id, city,
+            destination_type=("destination" if status == "destination" else "city"),
+            status="draft",
+            country=result.get("country") or "Россия",
+            country_code=result.get("country_code") or "RU",
+            region=result.get("region"),
+            currency=result.get("currency"),
+            local_timezone=result.get("timezone"),
+            local_language=result.get("local_language"),
+        )
         update_city(msg.from_user.id, city); clear_context(msg.from_user.id)
         log_analytics_event("trip_draft_created", user_id=msg.from_user.id, trip_id=trip_id, event_data={"city": city, "source": "onboarding"})
         await _ask_trip_dates(msg, state, trip_id); return
@@ -2138,11 +2163,10 @@ async def handle_trip_city(msg: Message, state: FSMContext):
         await msg.answer(f"Похоже, ты имеешь в виду {result['suggestion']}. Напиши название ещё раз для подтверждения 👇", reply_markup=TRIP_CREATE_KB); return
     if status == "ambiguous":
         variants = result.get("variants") or []
-        await msg.answer("Нашёл несколько вариантов:\n" + "\n".join(f"• {v}" for v in variants[:5]) + "\n\nНапиши нужный полностью 👇", reply_markup=TRIP_CREATE_KB); return
+        labels = [v.get("label") if isinstance(v, dict) else str(v) for v in variants[:5]]
+        await msg.answer("Нашёл несколько вариантов:\n" + "\n".join(f"• {v}" for v in labels) + "\n\nНапиши нужный полностью 👇", reply_markup=TRIP_CREATE_KB); return
     if status == "region":
         await msg.answer("Это большой регион. Напиши конкретный город, курорт или район 👇", reply_markup=TRIP_CREATE_KB); return
-    if status == "foreign":
-        await msg.answer("Пока создаём поездки только по России. Напиши российское направление 👇", reply_markup=TRIP_CREATE_KB); return
     await msg.answer("Не распознал направление. Напиши конкретный город или курорт 👇", reply_markup=TRIP_CREATE_KB)
 
 
@@ -2408,7 +2432,7 @@ async def cb_trip_open(cq: CallbackQuery):
     title = trip["title"] or f"Поездка в {trip['city']}"
     text = (
         f"✈️ {html.escape(title)}\n\n"
-        f"🏙 {html.escape(trip['city'])}\n"
+        f"🏙 {html.escape(trip['city'])}{' · ' + html.escape(trip['country']) if 'country' in trip.keys() and trip['country'] else ''}\n"
         f"📅 {trip_period_text(trip)}\n"
         f"📌 Статус: {trip_status_label(trip['status'])}\n"
         f"{'✅ Сейчас активна' if is_active else '○ Не выбрана'}"
@@ -2593,13 +2617,6 @@ async def handle_city_input(msg: Message, state: FSMContext):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
 
-    elif status == "foreign":
-        await msg.answer(
-            "🇷🇺 Пока работаю только по городам и курортам России.\n\n"
-            "Напиши российский город, например: Сочи, Казань или Владивосток 👇",
-            reply_markup=CITY_INPUT_KB,
-        )
-
     else:  # not_city
         await msg.answer(
             "🤔 Не понял — напиши название конкретного города или курорта.\n\n"
@@ -2752,9 +2769,9 @@ async def cb_feedback_reason(cq: CallbackQuery):
 # ОБЩАЯ ФУНКЦИЯ ОТПРАВКИ РЕЗУЛЬТАТА С РЕАКЦИЯМИ
 # ──────────────────────────────────────────────────────────────
 async def send_result(msg: Message, raw_answer: str, city: str, category: str,
-                      kb=None, with_feedback: bool = True):
+                      kb=None, with_feedback: bool = True, country: str | None = None):
     """Парсит JSON, строит текст с ссылками, отправляет с кнопками реакции."""
-    text, place_names, resp_type = parse_gpt_response(raw_answer, city)
+    text, place_names, resp_type = parse_gpt_response(raw_answer, city, country)
     full_text = text + BACK_TEXT
 
     response_id = new_response_id()
@@ -2789,15 +2806,21 @@ def _json_list(value, default=None):
         return default
 
 
-def _trip_plan_prompt(trip) -> str:
+def _trip_plan_prompt(trip, start_day: int, end_day: int, excluded_names: list[str] | None = None) -> str:
     interests = _json_list(trip["interests_json"])
     transport = _json_list(trip["transport_json"])
     children = _json_list(trip["children_json"])
-    days_count = int(trip["days_count"] or 1)
-    return f"""Ты — премиальный travel-консьерж по России. Составь реалистичный персональный план поездки.
+    excluded_names = excluded_names or []
+    block_days = end_day - start_day + 1
+    return f"""Ты — премиальный русскоязычный travel-консьерж по поездкам по всему миру.
+Составь только очередной блок персонального маршрута.
 
-НАПРАВЛЕНИЕ: {trip['city']}
-ДНЕЙ: {days_count}
+НАПРАВЛЕНИЕ: {trip['city']}, {trip['country'] or 'Россия'}
+РЕГИОН: {trip['region'] or 'не указан'}
+ВАЛЮТА: {trip['currency'] or 'не определена'}
+МЕСТНЫЙ ЯЗЫК: {trip['local_language'] or 'не определён'}
+ВСЕГО ДНЕЙ: {int(trip['days_count'] or 1)}
+СЕЙЧАС НУЖНЫ ДНИ: {start_day}-{end_day} ({block_days} дн.)
 ДАТЫ: {trip['start_date'] or 'не указаны'} — {trip['end_date'] or 'не указаны'}
 СОСТАВ: {trip['party_type'] or 'не указан'}
 ДЕТИ: {json.dumps(children, ensure_ascii=False)}
@@ -2806,98 +2829,68 @@ def _trip_plan_prompt(trip) -> str:
 ТРАНСПОРТ: {json.dumps(transport, ensure_ascii=False)}
 ИНТЕРЕСЫ: {json.dumps(interests, ensure_ascii=False)}
 ЖИЛЬЁ/РАЙОН: {trip['accommodation_name'] or ''} {trip['accommodation_address'] or ''}
-ОСОБЫЕ ПОЖЕЛАНИЯ: {trip['special_requests'] or 'нет'}
+ПОЖЕЛАНИЯ: {trip['special_requests'] or 'нет'}
+УЖЕ ИСПОЛЬЗОВАННЫЕ МЕСТА — НЕ ПОВТОРЯТЬ: {json.dumps(excluded_names[-80:], ensure_ascii=False)}
 
-Верни ТОЛЬКО валидный JSON без markdown:
-{{
-  "type": "trip_plan",
-  "title": "Короткое название поездки",
-  "concept": "Общая концепция в 1-2 предложениях",
-  "days": [
-    {{
-      "day_number": 1,
-      "title": "Название дня",
-      "theme": "Тема дня",
-      "pace": "спокойный|умеренный|насыщенный",
-      "walking_distance_km": 6.5,
-      "estimated_budget": "Доступный|Средний|Выше среднего",
-      "notes": "Короткая практическая заметка",
-      "items": [
-        {{
-          "start_time": "09:00",
-          "end_time": "10:00",
-          "name": "Точное официальное название места либо понятное название общей активности",
-          "item_kind": "place|activity",
-          "category": "завтрак|достопримечательность|прогулка|обед|музей|ужин|отдых|другое",
-          "address": "Район или ориентир; не выдумывай точный адрес",
-          "estimated_cost": "Доступно|Средне|Выше среднего|Бесплатно",
-          "personal_reason": "Почему это подходит именно этой поездке",
-          "ai_tip": "Практический совет",
-          "transport_to_next": "пешком|такси|транспорт|авто|—",
-          "travel_minutes": 15,
-          "is_backup": false
-        }}
-      ]
-    }}
-  ]
-}}
+Верни ТОЛЬКО JSON:
+{{"type":"trip_plan","title":"Короткое название поездки","concept":"Концепция блока","days":[{{
+"day_number":{start_day},"title":"Название дня","theme":"Тема","pace":"спокойный|умеренный|насыщенный",
+"walking_distance_km":6.5,"estimated_budget":"Доступный|Средний|Выше среднего","notes":"Практическая заметка",
+"items":[{{"start_time":"09:00","end_time":"10:00","name":"Точное официальное название или честная активность",
+"item_kind":"place|activity","category":"категория","address":"район/ориентир",
+"estimated_cost":"Доступно|Средне|Выше среднего|Бесплатно","personal_reason":"почему подходит",
+"ai_tip":"практический совет","transport_to_next":"пешком|такси|транспорт|авто|—","travel_minutes":15,"is_backup":false}}]}}]}}
 
-ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
-- Ровно {days_count} дней, day_number от 1 до {days_count} без пропусков.
-- В каждом дне 4-6 основных пунктов и максимум 1 запасной.
-- География дня должна быть логичной; не гоняй человека через весь город.
-- Время строго HH:MM и по возрастанию.
-- Не повторяй одно место в разные дни без веской причины.
-- Учитывай состав, детей, темп, бюджет, транспорт и жильё.
-- Не указывай конкретные цены в рублях, телефоны и непроверенные часы работы.
-- Для item_kind="place" указывай только конкретное реально существующее место с официальным названием, которое можно найти на картах.
-- Нельзя выдавать общие формулировки вроде «семейный ресторан», «кафе с видом», «музей истории города» или «пляж» за конкретное место.
-- Если точное место неизвестно или пользователь должен выбрать его сам, ставь item_kind="activity" и давай честное название активности: «Завтрак рядом с жильём», «Свободное время на пляже».
-- Для activity не притворяйся, что известен точный адрес.
-- Лучше дать меньше конкретных мест, чем выдумать заведение.
-- Для маленького города допускаются активности без конкретного заведения.
+ОБЯЗАТЕЛЬНО:
+- Верни ровно {block_days} дней с day_number {start_day}..{end_day}.
+- 4-6 основных пунктов на день, максимум 1 запасной.
+- Логичная география и время по возрастанию.
+- Для place — только конкретное реально существующее место с официальным названием.
+- Для activity — честная общая активность без фиктивного адреса.
+- Название конкретного места желательно дать также в оригинальном написании в скобках.
+- Учитывай местную культуру, климат и реальные расстояния.
+- Не указывай непроверенные часы работы, телефоны и точные цены.
+- Не повторяй уже использованные места.
 """
 
 
-def _generate_trip_plan_sync(trip) -> str:
+def _generate_trip_plan_chunk_sync(trip, start_day: int, end_day: int, excluded_names: list[str]) -> str:
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": "Ты возвращаешь только строгий валидный JSON согласно схеме."},
-            {"role": "user", "content": _trip_plan_prompt(trip)},
+            {"role":"system","content":"Верни только строгий валидный JSON. Не добавляй пояснений."},
+            {"role":"user","content":_trip_plan_prompt(trip, start_day, end_day, excluded_names)},
         ],
-        max_tokens=7000,
-        temperature=0.45,
+        max_tokens=6500, temperature=0.4,
     )
     return response.choices[0].message.content.strip()
 
 
-def _repair_trip_plan_sync(raw: str, trip) -> str:
+def _repair_trip_plan_chunk_sync(raw: str, trip, start_day: int, end_day: int) -> str:
+    count = end_day - start_day + 1
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": "Исправь JSON. Верни только валидный JSON без пояснений и markdown."},
-            {"role": "user", "content": (
-                f"Нужен план ровно на {int(trip['days_count'] or 1)} дней для {trip['city']}. "
-                "Исправь структуру, типы, нумерацию дней и обязательные поля.\n\n"
-                f"Исходный ответ:\n{raw[:24000]}"
-            )},
+            {"role":"system","content":"Исправь JSON и верни только валидный JSON."},
+            {"role":"user","content":f"Нужен блок ровно из {count} дней, номера {start_day}-{end_day}, для {trip['city']}, {trip['country'] or 'Россия'}. Исправь структуру и обязательные поля.\n\n{raw[:24000]}"},
         ],
-        max_tokens=7000,
-        temperature=0.1,
+        max_tokens=6500, temperature=0.1,
     )
     return response.choices[0].message.content.strip()
 
 
-async def generate_trip_plan_ai(trip) -> str:
+async def generate_trip_plan_chunk_ai(trip, start_day: int, end_day: int, excluded_names: list[str]) -> str:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _generate_trip_plan_sync, trip)
+    return await loop.run_in_executor(None, _generate_trip_plan_chunk_sync, trip, start_day, end_day, excluded_names)
 
 
-async def repair_trip_plan_ai(raw: str, trip) -> str:
+async def repair_trip_plan_chunk_ai(raw: str, trip, start_day: int, end_day: int) -> str:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _repair_trip_plan_sync, raw, trip)
+    return await loop.run_in_executor(None, _repair_trip_plan_chunk_sync, raw, trip, start_day, end_day)
 
+
+def generation_chunks(days_count: int, chunk_size: int = 4) -> list[tuple[int, int]]:
+    return [(start, min(days_count, start + chunk_size - 1)) for start in range(1, days_count + 1, chunk_size)]
 
 def _extract_json_object(raw: str) -> dict:
     cleaned = (raw or "").strip()
@@ -2915,7 +2908,7 @@ def _extract_json_object(raw: str) -> dict:
     return data
 
 
-def validate_trip_plan(raw: str, expected_days: int) -> dict:
+def validate_trip_plan(raw: str, expected_days: int, start_day: int = 1) -> dict:
     data = _extract_json_object(raw)
     if data.get("type") != "trip_plan":
         raise ValueError("Неверный type")
@@ -2923,7 +2916,7 @@ def validate_trip_plan(raw: str, expected_days: int) -> dict:
     if not isinstance(days, list) or len(days) != expected_days:
         raise ValueError(f"Ожидалось дней: {expected_days}")
     seen_names = set()
-    for expected_number, day in enumerate(days, 1):
+    for expected_number, day in enumerate(days, start_day):
         if not isinstance(day, dict):
             raise ValueError("День должен быть объектом")
         day["day_number"] = expected_number
@@ -3039,6 +3032,41 @@ def save_trip_plan(trip_id: int, user_id: int, plan: dict):
         """, (plan.get("title") or trip["title"], now, trip_id, user_id))
 
 
+def save_trip_plan_chunk(trip_id: int, user_id: int, plan: dict, *, clear_days: bool = False):
+    """Сохраняет один блок дней. Готовые предыдущие блоки не теряются."""
+    trip = get_trip(trip_id, user_id)
+    if not trip:
+        raise ValueError("Поездка не найдена")
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    start_date = None
+    if trip["start_date"]:
+        try: start_date = datetime.strptime(trip["start_date"], "%Y-%m-%d").date()
+        except Exception: start_date = None
+    with db_connection() as conn:
+        if clear_days:
+            conn.execute("DELETE FROM trip_items WHERE trip_id=?", (trip_id,))
+            conn.execute("DELETE FROM trip_days WHERE trip_id=?", (trip_id,))
+        for day in plan["days"]:
+            number = int(day["day_number"])
+            existing = conn.execute("SELECT day_id FROM trip_days WHERE trip_id=? AND day_number=?", (trip_id, number)).fetchone()
+            if existing:
+                conn.execute("DELETE FROM trip_items WHERE day_id=?", (existing["day_id"],))
+                conn.execute("DELETE FROM trip_days WHERE day_id=?", (existing["day_id"],))
+            day_date = (start_date + timedelta(days=number-1)).isoformat() if start_date else None
+            cur = conn.execute("""INSERT INTO trip_days(trip_id,day_number,date,title,theme,pace,walking_distance_km,estimated_budget,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'planned',?,?,?)""",
+                (trip_id,number,day_date,str(day.get("title", ""))[:250],str(day.get("theme", ""))[:250],str(day.get("pace", ""))[:100],day.get("walking_distance_km"),str(day.get("estimated_budget", ""))[:100],str(day.get("notes", ""))[:1000],now,now))
+            day_id=cur.lastrowid
+            for pos,item in enumerate(day["items"],1):
+                conn.execute("""INSERT INTO trip_items(trip_id,day_id,custom_place_name,start_time,end_time,position,item_type,status,transport_to_next,travel_minutes,estimated_cost,personal_reason,ai_tip,is_backup,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'planned',?,?,?,?,?,?,?,?)""",
+                    (trip_id,day_id,str(item.get("name", ""))[:250],str(item.get("start_time", ""))[:5],str(item.get("end_time", ""))[:5],pos,str(item.get("item_kind", "place"))[:80],str(item.get("transport_to_next", ""))[:100],item.get("travel_minutes",0),str(item.get("estimated_cost", ""))[:100],str(item.get("personal_reason", ""))[:1200],str(item.get("ai_tip", ""))[:1200],1 if item.get("is_backup") else 0,now,now))
+        conn.execute("UPDATE trips SET title=COALESCE(NULLIF(?,''),title), updated_at=? WHERE trip_id=? AND user_id=?", (plan.get("title") or "",now,trip_id,user_id))
+
+
+def get_existing_trip_place_names(trip_id: int) -> list[str]:
+    with db_connection() as conn:
+        return [r[0] for r in conn.execute("SELECT custom_place_name FROM trip_items WHERE trip_id=? AND item_type='place' AND custom_place_name IS NOT NULL", (trip_id,)).fetchall() if r[0]]
+
+
 def get_trip_days(trip_id: int, user_id: int):
     with db_connection() as conn:
         return conn.execute("""
@@ -3052,7 +3080,7 @@ def get_trip_days(trip_id: int, user_id: int):
 def get_trip_day(day_id: int, user_id: int):
     with db_connection() as conn:
         return conn.execute("""
-            SELECT d.*, t.city, t.title AS trip_title
+            SELECT d.*, t.city, t.country, t.title AS trip_title
             FROM trip_days d JOIN trips t ON t.trip_id=d.trip_id
             WHERE d.day_id=? AND t.user_id=?
         """, (day_id, user_id)).fetchone()
@@ -3276,7 +3304,7 @@ def restore_trip_version(version_id: int, user_id: int) -> int | None:
 
 
 def _replace_item_sync(item: sqlite3.Row, trip: sqlite3.Row, other_names: list[str]) -> dict:
-    prompt = f"""Ты заменяешь одну точку в готовом туристическом маршруте по России.
+    prompt = f"""Ты заменяешь одну точку в готовом туристическом маршруте по России и миру.
 Город: {trip['city']}
 Заменяемое место: {item['custom_place_name']}
 День: {item['day_number']}
@@ -3398,7 +3426,7 @@ def _day_text(day, items) -> str:
         if item["travel_minutes"]:
             block += f"\n🚶 До следующей точки: около {item['travel_minutes']} мин."
         if _item_is_specific_place(item):
-            block += f"\n{make_map_links(item['custom_place_name'] or '', day['city'])}"
+            block += f"\n{make_map_links(item['custom_place_name'] or '', day['city'], day['country'] if 'country' in day.keys() else None)}"
         else:
             block += "\n📍 Это общая активность — выбери подходящее место рядом по ситуации."
         blocks.append(block)
@@ -3433,48 +3461,62 @@ async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regener
         await msg.answer("Сначала укажи количество дней поездки.", reply_markup=TRIPS_KB)
         return
     if user_id in active_requests:
-        await msg.answer("⏳ Уже выполняю другой запрос. Подожди немного.")
+        await msg.answer("⏳ План уже создаётся. Дождись завершения текущего блока.")
         return
     active_requests.add(user_id)
     update_trip(trip_id, user_id, plan_generation_status="generating")
-    log_analytics_event("trip_generation_started", user_id=user_id, trip_id=trip_id, event_data={"regenerate": regenerate})
-    thinking = await msg.answer(f"✨ Собираю персональный план по {trip['city']} на {days_count} дн.\nЭто может занять немного времени…")
+    log_analytics_event("trip_generation_started", user_id=user_id, trip_id=trip_id, event_data={"regenerate":regenerate,"days":days_count,"mode":"batch"})
+    progress = await msg.answer(f"✨ Создаю маршрут по {trip['city']}, {trip['country'] or 'Россия'} на {days_count} дн. блоками по 4 дня…")
+    completed = []
     try:
-        raw = await generate_trip_plan_ai(trip)
-        try:
-            plan = validate_trip_plan(raw, days_count)
-        except Exception as first_error:
-            logging.warning(f"Trip plan first validation failed: {first_error}")
-            repaired = await repair_trip_plan_ai(raw, trip)
-            plan = validate_trip_plan(repaired, days_count)
         if regenerate and get_trip_days(trip_id, user_id):
             create_trip_version(trip_id, "full_regeneration")
-        save_trip_plan(trip_id, user_id, plan)
+            with db_connection() as conn:
+                conn.execute("DELETE FROM trip_items WHERE trip_id=?", (trip_id,))
+                conn.execute("DELETE FROM trip_days WHERE trip_id=?", (trip_id,))
+        existing_numbers = {d["day_number"] for d in get_trip_days(trip_id, user_id)}
+        chunks = generation_chunks(days_count, 4)
+        for index,(start_day,end_day) in enumerate(chunks,1):
+            needed=[n for n in range(start_day,end_day+1) if n not in existing_numbers]
+            if not needed:
+                completed.append(f"✅ Дни {start_day}–{end_day} уже готовы")
+                continue
+            # Если блок частично сохранён, пересобираем весь блок для связности.
+            excluded=get_existing_trip_place_names(trip_id)
+            await progress.edit_text("✨ Создаю поездку блоками\n\n" + "\n".join(completed + [f"⏳ Дни {start_day}–{end_day}: формирую маршрут…"]))
+            raw=await generate_trip_plan_chunk_ai(trip,start_day,end_day,excluded)
+            try:
+                plan=validate_trip_plan(raw,end_day-start_day+1,start_day=start_day)
+            except Exception as first_error:
+                logging.warning(f"Chunk {start_day}-{end_day} validation failed: {first_error}")
+                repaired=await repair_trip_plan_chunk_ai(raw,trip,start_day,end_day)
+                plan=validate_trip_plan(repaired,end_day-start_day+1,start_day=start_day)
+            save_trip_plan_chunk(trip_id,user_id,plan)
+            existing_numbers.update(range(start_day,end_day+1))
+            completed.append(f"✅ Дни {start_day}–{end_day} готовы")
+            await progress.edit_text("✨ Создаю поездку блоками\n\n" + "\n".join(completed) + (f"\n\nОсталось: {days_count-end_day} дн." if end_day < days_count else ""))
+        all_days=get_trip_days(trip_id,user_id)
+        if len(all_days) != days_count:
+            raise ValueError(f"Сохранено {len(all_days)} из {days_count} дней")
+        update_trip(trip_id,user_id,status="ready",plan_generation_status="completed")
         increment_requests(user_id)
-        log_analytics_event("trip_generation_success", user_id=user_id, trip_id=trip_id, event_data={"days": days_count})
-        try: await thinking.delete()
+        log_analytics_event("trip_generation_success",user_id=user_id,trip_id=trip_id,event_data={"days":days_count,"chunks":len(chunks)})
+        try: await progress.delete()
         except Exception: pass
-        days = get_trip_days(trip_id, user_id)
-        concept = html.escape(plan.get("concept", ""))
-        # Убираем клавиатуру «Пропустить / Отмена», оставшуюся от онбординга.
-        await msg.answer("План готов. Управление поездкой — в меню ниже 👇", reply_markup=ACTIVE_TRIP_KB)
+        await msg.answer("✅ Все блоки маршрута готовы. Управление поездкой — в меню ниже 👇", reply_markup=ACTIVE_TRIP_KB)
         await msg.answer(
-            f"✅ <b>План поездки готов</b>\n\n{concept}\n\nВыбери день, чтобы открыть подробный маршрут:",
-            parse_mode="HTML", reply_markup=trip_plan_kb(trip_id, days)
-        )
+            f"✅ <b>План поездки готов</b>\n\n{html.escape(trip['city'])}, {html.escape(trip['country'] or 'Россия')} · {days_count} дней\n\nВыбери день:",
+            parse_mode="HTML", reply_markup=trip_plan_kb(trip_id,all_days))
     except Exception as e:
-        logging.exception(f"Trip generation error: {e}")
-        update_trip(trip_id, user_id, plan_generation_status="failed")
-        log_analytics_event("trip_generation_failed", user_id=user_id, trip_id=trip_id, event_data={"error": str(e)[:500]})
-        try: await thinking.delete()
+        logging.exception(f"Batch generation error: {e}")
+        update_trip(trip_id,user_id,plan_generation_status="failed")
+        ready=len(get_trip_days(trip_id,user_id))
+        log_analytics_event("trip_generation_failed",user_id=user_id,trip_id=trip_id,event_data={"error":str(e)[:500],"ready_days":ready})
+        try: await progress.delete()
         except Exception: pass
         await msg.answer(
-            "Не удалось надёжно собрать план. Черновик поездки сохранён — можно повторить генерацию.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Повторить", callback_data=f"trip_generate:{trip_id}")],
-                [InlineKeyboardButton(text="⬅️ К поездке", callback_data=f"trip_open:{trip_id}")],
-            ])
-        )
+            f"Не удалось завершить очередной блок. Уже сохранено дней: {ready} из {days_count}.\nПовторный запуск продолжит с недостающего блока.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Продолжить генерацию",callback_data=f"trip_generate:{trip_id}")],[InlineKeyboardButton(text="⬅️ К поездке",callback_data=f"trip_open:{trip_id}")]]))
     finally:
         active_requests.discard(user_id)
 
@@ -3830,7 +3872,9 @@ async def _generate_route(msg: Message):
             pass
 
         # Сохраняем полный raw в контекст
-        _, place_names, _ = parse_gpt_response(raw, city)
+        active_trip = get_active_trip(msg.from_user.id)
+        country = active_trip["country"] if active_trip else None
+        _, place_names, _ = parse_gpt_response(raw, city, country)
         add_to_context(msg.from_user.id, "user", "🗺 Маршрут на день")
         add_to_context(msg.from_user.id, "assistant", raw)
 
@@ -3841,7 +3885,7 @@ async def _generate_route(msg: Message):
                 history.append(place)
         route_history[msg.from_user.id] = history[-20:]
 
-        await send_result(msg, raw, city, "Маршрут на день", kb=ROUTE_KB)
+        await send_result(msg, raw, city, "Маршрут на день", kb=ROUTE_KB, country=country)
         increment_requests(msg.from_user.id)
         asyncio.create_task(log_sheets(
             msg.from_user.id, full_name(msg.from_user),
@@ -3915,7 +3959,9 @@ async def handle_hotel_format(msg: Message, state: FSMContext):
         except Exception:
             pass
         hotel_category = f"Отели: {text}"
-        parsed, _, resp_type = parse_gpt_response(raw, city)
+        active_trip = get_active_trip(msg.from_user.id)
+        country = active_trip["country"] if active_trip else None
+        parsed, _, resp_type = parse_gpt_response(raw, city, country)
         full_text = f"🏨 Где остановиться в {city} — {text}\n\n━━━━━━━━━━━━━━━\n\n" + parsed + BACK_TEXT
 
         await send_long(msg, full_text, reply_markup=MAIN_KB, disable_web_page_preview=True)
@@ -3968,7 +4014,7 @@ async def process_contextual_query(msg: Message, query_text: str, category: str 
         else:
             add_to_context(user_id, "user", query_text)
             add_to_context(user_id, "assistant", raw)
-        await send_result(msg, raw, city, category, with_feedback=True)
+        await send_result(msg, raw, city, category, with_feedback=True, country=(trip["country"] if trip else None))
         increment_requests(user_id)
         log_analytics_event("contextual_query_completed", user_id=user_id, trip_id=trip_id, event_data={"category": category})
         asyncio.create_task(log_sheets(user_id, full_name(msg.from_user), msg.from_user.username, category, query_text, len(raw)))
@@ -3998,7 +4044,7 @@ async def btn_start_trip_v7(msg: Message, state: FSMContext):
     await state.update_data(v7_trip_mode=mode)
     await state.set_state(UserState.trip_entering_city)
     prompt = "В каком городе ты сейчас находишься?" if mode == "already_here" else "Куда собираешься?"
-    await msg.answer(f"{prompt} Напиши город или курорт России 👇", reply_markup=TRIP_CREATE_KB)
+    await msg.answer(f"{prompt} Напиши город или курорт мира 👇", reply_markup=TRIP_CREATE_KB)
     log_analytics_event("trip_creation_started", user_id=msg.from_user.id, event_data={"mode": mode})
 
 
@@ -4142,7 +4188,7 @@ async def btn_about(msg: Message):
         "💎 Места куда редко доходят туристы\n"
         "📸 Определяю места по фото\n"
         "━━━━━━━━━━━━━━━\n\n"
-        "🇷🇺 Работаю по всем городам и курортам России\n\n"
+        "🌍 Работаю по городам и курортам России и мира\n\n"
         "━━━━━━━━━━━━━━━\n"
         "💡 Идеи и замечания — жми Поддержка 👇",
         reply_markup=MAIN_KB,
@@ -4414,7 +4460,7 @@ async def cmd_help(msg: Message):
     await msg.answer(
         "🗺 Как пользоваться AI Местным\n\n"
         "━━━━━━━━━━━━━━━\n"
-        "🏙 Напиши любой город или курорт России\n"
+        "🏙 Напиши любой город или курорт мира\n"
         "🔘 Жми кнопку — получишь подборку мест\n"
         "✏️ Пиши свободным текстом\n"
         "📸 Скинь фото — определю место\n"
