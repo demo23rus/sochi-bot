@@ -3723,7 +3723,7 @@ async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regener
                 continue
             # Если блок частично сохранён, пересобираем весь блок для связности.
             excluded=get_existing_trip_place_names(trip_id)
-            await progress.edit_text("✦ <b>СОБИРАЮ МАРШРУТ</b>\n\n" + "\n".join(completed + [f"◌ Дни {start_day}–{end_day} · создаю…"]))
+            await progress.edit_text("✦ <b>СОБИРАЮ МАРШРУТ</b>\n\n" + "\n".join(completed + [f"◌ Дни {start_day}–{end_day} · создаю…"]), parse_mode="HTML")
             raw=await generate_trip_plan_chunk_ai(trip,start_day,end_day,excluded)
             try:
                 plan=validate_trip_plan(raw,end_day-start_day+1,start_day=start_day)
@@ -3734,7 +3734,7 @@ async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regener
             save_trip_plan_chunk(trip_id,user_id,plan)
             existing_numbers.update(range(start_day,end_day+1))
             completed.append(f"✅ Дни {start_day}–{end_day} готовы")
-            await progress.edit_text("✦ <b>СОБИРАЮ МАРШРУТ</b>\n\n" + "\n".join(completed) + (f"\n\nОсталось дней: {days_count-end_day}" if end_day < days_count else ""))
+            await progress.edit_text("✦ <b>СОБИРАЮ МАРШРУТ</b>\n\n" + "\n".join(completed) + (f"\n\nОсталось дней: {days_count-end_day}" if end_day < days_count else ""), parse_mode="HTML")
         all_days=get_trip_days(trip_id,user_id)
         if len(all_days) != days_count:
             raise ValueError(f"Сохранено {len(all_days)} из {days_count} дней")
