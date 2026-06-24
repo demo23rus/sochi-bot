@@ -37,7 +37,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ErrorEvent,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -375,6 +375,57 @@ dialog_context: dict[int, list] = {}
 
 # История мест маршрутов: user_id → list названий (накапливается, макс 20)
 route_history: dict[int, list] = {}
+
+# Антиспам уведомлений владельцу: одинаковая ошибка одному пользователю не чаще 1 раза в 10 минут.
+owner_alert_cooldown: dict[str, float] = {}
+OWNER_ALERT_COOLDOWN_SECONDS = 600
+
+async def notify_owner_error(
+    *,
+    user=None,
+    action: str,
+    error=None,
+    trip_id: int | None = None,
+    details: str | None = None,
+    force: bool = False,
+):
+    """Сообщает владельцу о пользовательских сбоях, не прерывая работу бота."""
+    try:
+        user_id = getattr(user, "id", None)
+        if user_id == OWNER_ID and not force:
+            return
+        error_name = type(error).__name__ if error is not None else "Warning"
+        error_text = str(error or details or "Без описания").strip()[:900]
+        fingerprint = f"{user_id}:{action}:{error_name}:{error_text[:160]}"
+        now_ts = time.time()
+        if not force and now_ts - owner_alert_cooldown.get(fingerprint, 0) < OWNER_ALERT_COOLDOWN_SECONDS:
+            return
+        owner_alert_cooldown[fingerprint] = now_ts
+        if len(owner_alert_cooldown) > 1000:
+            cutoff = now_ts - 86400
+            for key in [k for k, ts in owner_alert_cooldown.items() if ts < cutoff]:
+                owner_alert_cooldown.pop(key, None)
+
+        name = full_name(user) if user is not None else "Неизвестный пользователь"
+        username = f"@{user.username}" if user is not None and getattr(user, "username", None) else "без username"
+        lines = [
+            "🚨 <b>Ошибка в AI Местном</b>",
+            "",
+            f"Действие: <b>{html.escape(action)}</b>",
+            f"Пользователь: {html.escape(name)}",
+            f"ID: <code>{user_id or 'неизвестен'}</code>",
+            f"Username: {html.escape(username)}",
+        ]
+        if trip_id is not None:
+            lines.append(f"Поездка: <code>{trip_id}</code>")
+        lines.extend([
+            f"Тип: <code>{html.escape(error_name)}</code>",
+            f"Описание: {html.escape(error_text)}",
+            f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
+        ])
+        await bot.send_message(OWNER_ID, "\n".join(lines), parse_mode="HTML")
+    except Exception as notify_error:
+        logging.error(f"Owner alert failed: {notify_error}")
 
 # ──────────────────────────────────────────────────────────────
 # БАЗА ДАННЫХ V7 — МИГРАЦИИ И РЕПОЗИТОРИИ
@@ -1488,9 +1539,57 @@ def _detect_city_sync(user_input: str) -> dict:
         data["country_code"] = (data.get("country_code") or ("RU" if data["country"] == "Россия" else "")).upper()
     return data
 
+CITY_FALLBACK_META = {
+    "пермь": {"city":"Пермь","country":"Россия","country_code":"RU","region":"Пермский край","currency":"RUB","timezone":"Asia/Yekaterinburg","local_language":"русский"},
+    "стамбул": {"city":"Стамбул","country":"Турция","country_code":"TR","region":"Стамбул","currency":"TRY","timezone":"Europe/Istanbul","local_language":"турецкий"},
+    "анталия": {"city":"Анталия","country":"Турция","country_code":"TR","region":"Анталия","currency":"TRY","timezone":"Europe/Istanbul","local_language":"турецкий"},
+    "дубай": {"city":"Дубай","country":"ОАЭ","country_code":"AE","region":"Дубай","currency":"AED","timezone":"Asia/Dubai","local_language":"арабский"},
+    "москва": {"city":"Москва","country":"Россия","country_code":"RU","region":"Москва","currency":"RUB","timezone":"Europe/Moscow","local_language":"русский"},
+    "санкт-петербург": {"city":"Санкт-Петербург","country":"Россия","country_code":"RU","region":"Санкт-Петербург","currency":"RUB","timezone":"Europe/Moscow","local_language":"русский"},
+    "питер": {"city":"Санкт-Петербург","country":"Россия","country_code":"RU","region":"Санкт-Петербург","currency":"RUB","timezone":"Europe/Moscow","local_language":"русский"},
+    "сочи": {"city":"Сочи","country":"Россия","country_code":"RU","region":"Краснодарский край","currency":"RUB","timezone":"Europe/Moscow","local_language":"русский"},
+    "казань": {"city":"Казань","country":"Россия","country_code":"RU","region":"Республика Татарстан","currency":"RUB","timezone":"Europe/Moscow","local_language":"русский"},
+    "рим": {"city":"Рим","country":"Италия","country_code":"IT","region":"Лацио","currency":"EUR","timezone":"Europe/Rome","local_language":"итальянский"},
+    "париж": {"city":"Париж","country":"Франция","country_code":"FR","region":"Иль-де-Франс","currency":"EUR","timezone":"Europe/Paris","local_language":"французский"},
+    "бали": {"city":"Бали","country":"Индонезия","country_code":"ID","region":"Бали","currency":"IDR","timezone":"Asia/Makassar","local_language":"индонезийский"},
+}
+
+def _fallback_destination(user_input: str) -> dict:
+    clean = " ".join((user_input or "").strip().split())
+    key = clean.casefold().replace("ё", "е")
+    for known, meta in CITY_FALLBACK_META.items():
+        if key == known.replace("ё", "е"):
+            return {"status":"ok", **meta, "suggestion":None, "variants":None, "_fallback_used":True}
+    if 2 <= len(clean) <= 80 and any(ch.isalpha() for ch in clean):
+        return {
+            "status":"ok", "city":clean.title(), "country":"Не определена",
+            "country_code":"", "region":None, "currency":None,
+            "timezone":None, "local_language":None, "suggestion":None, "variants":None, "_fallback_used":True,
+        }
+    return {"status":"not_city", "city":None, "country":None, "country_code":None,
+            "region":None, "currency":None, "timezone":None, "local_language":None,
+            "suggestion":None, "variants":None}
+
 async def detect_city(user_input: str) -> dict:
+    """AI-проверка с повтором и безопасным локальным резервом."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _detect_city_sync, user_input)
+    last_error = None
+    for attempt in range(2):
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _detect_city_sync, user_input),
+                timeout=35,
+            )
+        except Exception as error:
+            last_error = error
+            logging.warning(f"detect_city attempt {attempt + 1} failed: {type(error).__name__}: {error}")
+            if attempt == 0:
+                await asyncio.sleep(1.2)
+    logging.error(f"detect_city fallback used: {type(last_error).__name__ if last_error else 'unknown'}: {last_error}")
+    result = _fallback_destination(user_input)
+    result["_fallback_used"] = True
+    result["_fallback_error"] = f"{type(last_error).__name__ if last_error else 'unknown'}: {last_error}"[:500]
+    return result
 
 # ──────────────────────────────────────────────────────────────
 # GPT — ВИЗИТКА ГОРОДА
@@ -2188,8 +2287,14 @@ async def handle_trip_city(msg: Message, state: FSMContext):
     thinking = await msg.answer("🔍 Проверяю направление...")
     try:
         result = await detect_city(text)
+        if result.get("_fallback_used"):
+            await notify_owner_error(
+                user=msg.from_user, action="Проверка направления — включён резерв",
+                details=result.get("_fallback_error") or f"Город принят резервно: {text}",
+            )
     except Exception as e:
         logging.error(f"trip detect_city error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Проверка направления", error=e)
         try: await thinking.delete()
         except Exception: pass
         await msg.answer("Не удалось проверить направление. Попробуй ещё раз 👇", reply_markup=TRIP_CREATE_KB); return
@@ -2611,8 +2716,14 @@ async def handle_city_input(msg: Message, state: FSMContext):
     thinking = await msg.answer("🔍 Проверяю...")
     try:
         result = await detect_city(text)
+        if result.get("_fallback_used"):
+            await notify_owner_error(
+                user=msg.from_user, action="Смена города — включён резерв",
+                details=result.get("_fallback_error") or f"Город принят резервно: {text}",
+            )
     except Exception as e:
         logging.error(f"detect_city error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Смена города", error=e)
         try:
             await thinking.delete()
         except Exception:
@@ -3537,6 +3648,7 @@ async def _run_trip_generation(msg: Message, user_id: int, trip_id: int, regener
             parse_mode="HTML", reply_markup=trip_plan_kb(trip_id,all_days))
     except Exception as e:
         logging.exception(f"Batch generation error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Генерация маршрута", error=e, trip_id=trip_id)
         update_trip(trip_id,user_id,plan_generation_status="failed")
         ready=len(get_trip_days(trip_id,user_id))
         log_analytics_event("trip_generation_failed",user_id=user_id,trip_id=trip_id,event_data={"error":str(e)[:500],"ready_days":ready})
@@ -3712,6 +3824,7 @@ async def cb_item_replace(cq: CallbackQuery):
         )
     except Exception as e:
         logging.exception(f"Replace item error: {e}")
+        await notify_owner_error(user=cq.from_user, action="Замена места в маршруте", error=e, trip_id=item["trip_id"] if item else None)
         try: await thinking.delete()
         except Exception: pass
         await cq.message.answer("Не смог надёжно подобрать замену. Попробуй ещё раз позже.")
@@ -3932,6 +4045,7 @@ async def _generate_route(msg: Message):
             msg.from_user.username, "Маршрут на день", f"🗺 {city}", len(raw)))
     except Exception as e:
         logging.error(f"Route error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Маршрут на день", error=e, trip_id=(get_active_trip(msg.from_user.id)["trip_id"] if get_active_trip(msg.from_user.id) else None))
         try:
             await thinking.delete()
         except Exception:
@@ -4018,6 +4132,7 @@ async def handle_hotel_format(msg: Message, state: FSMContext):
             msg.from_user.username, hotel_category, f"🏨 {text} в {city}", len(raw)))
     except Exception as e:
         logging.error(f"Hotels error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Подбор жилья", error=e, trip_id=(get_active_trip(msg.from_user.id)["trip_id"] if get_active_trip(msg.from_user.id) else None))
         try:
             await thinking.delete()
         except Exception:
@@ -4060,6 +4175,7 @@ async def process_contextual_query(msg: Message, query_text: str, category: str 
         asyncio.create_task(log_sheets(user_id, full_name(msg.from_user), msg.from_user.username, category, query_text, len(raw)))
     except Exception as e:
         logging.exception(f"Contextual query error: {e}")
+        await notify_owner_error(user=msg.from_user, action=f"Запрос консьержу: {category}", error=e, trip_id=trip_id)
         try: await thinking.delete()
         except Exception: pass
         await msg.answer("Не удалось обработать запрос. Попробуй ещё раз.", reply_markup=main_kb_for(user_id))
@@ -4676,6 +4792,7 @@ async def handle_voice(msg: Message):
             msg.from_user.username, "Голосовое", f"🎤 {text}", len(raw)))
     except Exception as e:
         logging.error(f"Voice error: {e}")
+        await notify_owner_error(user=msg.from_user, action="Обработка голосового", error=e, trip_id=(get_active_trip(msg.from_user.id)["trip_id"] if get_active_trip(msg.from_user.id) else None))
         await msg.answer("Не смог обработать голосовое. Напиши текстом 👇" + BACK_TEXT, reply_markup=MAIN_KB)
     finally:
         active_requests.discard(msg.from_user.id)
@@ -4713,6 +4830,24 @@ async def handle_text(msg: Message, state: FSMContext):
     await process_contextual_query(msg, text, category=category)
 
 # ──────────────────────────────────────────────────────────────
+# ГЛОБАЛЬНЫЙ ПЕРЕХВАТ НЕОБРАБОТАННЫХ ОШИБОК
+# ──────────────────────────────────────────────────────────────
+@dp.errors()
+async def global_error_handler(event: ErrorEvent):
+    update = getattr(event, "update", None)
+    message = getattr(update, "message", None) if update is not None else None
+    callback = getattr(update, "callback_query", None) if update is not None else None
+    user = getattr(message, "from_user", None) or getattr(callback, "from_user", None)
+    await notify_owner_error(
+        user=user,
+        action="Необработанная ошибка обработчика",
+        error=getattr(event, "exception", None),
+        force=(user is None),
+    )
+    logging.exception("Unhandled aiogram error", exc_info=getattr(event, "exception", None))
+    return True
+
+# ──────────────────────────────────────────────────────────────
 # FALLBACK
 # ──────────────────────────────────────────────────────────────
 @dp.message()
@@ -4731,7 +4866,7 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     acquire_single_instance_lock()
     init_db()
-    logging.info("AI Местный v7.1 UX Fix запущен")
+    logging.info("AI Местный v8 World Owner Alerts запущен")
     await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
