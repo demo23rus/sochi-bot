@@ -132,6 +132,7 @@ ACTIVE_TRIP_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="🗓 Моя поездка"), KeyboardButton(text="🗺 План на сегодня")],
         [KeyboardButton(text="🔎 Быстро найти место"), KeyboardButton(text="💬 Спросить консьержа")],
         [KeyboardButton(text="⭐ Сохранённые места"), KeyboardButton(text="➕ Ещё")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
     ],
     resize_keyboard=True,
     input_field_placeholder="Спроси что угодно о поездке…",
@@ -167,6 +168,7 @@ REPLAN_KB = ReplyKeyboardMarkup(
 MORE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔄 Изменить планы"), KeyboardButton(text="✈️ Мои поездки")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="☕ Кофе с видом"), KeyboardButton(text="🌅 На рассвет")],
         [KeyboardButton(text="👨‍👩‍👧 С детьми"), KeyboardButton(text="❤️ Для двоих")],
         [KeyboardButton(text="🏔 На природу"), KeyboardButton(text="🌃 Вечером")],
@@ -226,7 +228,10 @@ TRIPS_KB = ReplyKeyboardMarkup(
 )
 
 TRIP_CREATE_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="❌ Отмена")]],
+    keyboard=[
+        [KeyboardButton(text="♻️ Сбросить поездку")],
+        [KeyboardButton(text="❌ Отмена")],
+    ],
     resize_keyboard=True,
 )
 
@@ -234,6 +239,7 @@ TRIP_DATES_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📅 Указать даты"), KeyboardButton(text="🔢 Указать количество дней")],
         [KeyboardButton(text="🤷 Пока не знаю")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -243,6 +249,7 @@ TRIP_PARTY_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="👤 Один"), KeyboardButton(text="❤️ Вдвоём")],
         [KeyboardButton(text="👨‍👩‍👧 С семьёй"), KeyboardButton(text="👥 С друзьями")],
         [KeyboardButton(text="👴 Со старшими"), KeyboardButton(text="✍️ Другой вариант")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -253,6 +260,7 @@ TRIP_CHILDREN_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="До 3 лет"), KeyboardButton(text="4–7 лет")],
         [KeyboardButton(text="8–12 лет"), KeyboardButton(text="13–17 лет")],
         [KeyboardButton(text="Несколько возрастов")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -262,6 +270,7 @@ TRIP_BUDGET_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="💚 Экономно"), KeyboardButton(text="💛 Комфортно")],
         [KeyboardButton(text="💎 Выше среднего"), KeyboardButton(text="👑 Премиум")],
         [KeyboardButton(text="⚖️ Смешанный")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -270,6 +279,7 @@ TRIP_PACE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🌿 Спокойный"), KeyboardButton(text="🚶 Умеренный")],
         [KeyboardButton(text="⚡ Насыщенный"), KeyboardButton(text="🎛 Разный по дням")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -279,6 +289,7 @@ TRIP_TRANSPORT_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="🚶 В основном пешком"), KeyboardButton(text="🚇 Общественный транспорт")],
         [KeyboardButton(text="🚕 Такси"), KeyboardButton(text="🚗 Своя машина")],
         [KeyboardButton(text="🚙 Аренда автомобиля"), KeyboardButton(text="🔀 Комбинированно")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
@@ -287,12 +298,17 @@ TRIP_ACCOMMODATION_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📍 Указать адрес"), KeyboardButton(text="🏨 Указать отель")],
         [KeyboardButton(text="🗺 Указать район"), KeyboardButton(text="🤷 Пока не знаю")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
         [KeyboardButton(text="❌ Отмена")],
     ], resize_keyboard=True,
 )
 
 TRIP_SKIP_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Пропустить")], [KeyboardButton(text="❌ Отмена")]],
+    keyboard=[
+        [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text="♻️ Сбросить поездку")],
+        [KeyboardButton(text="❌ Отмена")],
+    ],
     resize_keyboard=True,
 )
 
@@ -321,6 +337,7 @@ SYSTEM_BUTTONS = {
     "🔄 Изменить планы", "🏛 Что посмотреть", "🌿 На природу", "🌇 Красивый вид",
     "☔ Пошёл дождь", "😴 Мы устали", "💰 Нужно дешевле", "🚶 Меньше ходить",
     "⏰ Осталось мало времени", "🌙 Уже поздно", "❌ Место закрыто", "🍽 Хотим поесть сейчас",
+    "♻️ Сбросить поездку",
 } | HOTEL_FORMATS
 
 BACK_TEXT = "\n\n✨ Что ещё найдём? Жми или пиши 👇"
@@ -982,6 +999,28 @@ def set_active_trip(user_id: int, trip_id: int | None) -> bool:
             (trip_id, now, user_id),
         )
         return True
+
+
+def reset_current_trip_context(user_id: int) -> int | None:
+    """Снимает активную поездку и город, сохраняя саму поездку в разделе «Мои поездки»."""
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT active_trip_id FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        trip_id = row["active_trip_id"] if row else None
+        conn.execute(
+            "UPDATE users SET active_trip_id=NULL, city=NULL, updated_at=? WHERE user_id=?",
+            (now, user_id),
+        )
+        conn.execute(
+            "DELETE FROM ai_context WHERE user_id=?",
+            (user_id,),
+        )
+    clear_context(user_id)
+    active_requests.discard(user_id)
+    return trip_id
 
 
 def update_trip(trip_id: int, user_id: int, **fields) -> bool:
@@ -2260,6 +2299,68 @@ async def _resume_trip_onboarding(msg: Message, state: FSMContext, trip_id: int)
             confirm_kb,
             parse_mode="HTML",
         )
+
+
+@dp.message(Command("reset"))
+@dp.message(F.text == "♻️ Сбросить поездку")
+async def btn_reset_trip(msg: Message, state: FSMContext):
+    """Доступен из любого шага и всегда перехватывается раньше FSM-обработчиков."""
+    trip = get_active_trip(msg.from_user.id)
+    data = await state.get_data()
+    draft_trip_id = data.get("onboarding_trip_id")
+    trip_id = trip["trip_id"] if trip else draft_trip_id
+
+    if not trip_id and not get_user_city(msg.from_user.id):
+        await state.clear()
+        await msg.answer(
+            "Сбрасывать нечего — активного города или поездки сейчас нет.",
+            reply_markup=NO_TRIP_KB,
+        )
+        return
+
+    city = trip["city"] if trip else get_user_city(msg.from_user.id) or "текущую поездку"
+    await msg.answer(
+        f"♻️ <b>Сбросить текущую поездку?</b>\n\n"
+        f"Город <b>{html.escape(city)}</b> будет убран из активного режима. "
+        f"Сама поездка сохранится в разделе «Мои поездки», и к ней можно будет вернуться.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Да, сбросить", callback_data="trip_reset_confirm")],
+            [InlineKeyboardButton(text="Отмена", callback_data="trip_reset_cancel")],
+        ]),
+    )
+
+
+@dp.callback_query(F.data == "trip_reset_confirm")
+async def cb_trip_reset_confirm(cq: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    draft_trip_id = data.get("onboarding_trip_id")
+    await state.clear()
+    trip_id = reset_current_trip_context(cq.from_user.id)
+    affected_trip_id = trip_id or draft_trip_id
+    log_analytics_event(
+        "trip_context_reset",
+        user_id=cq.from_user.id,
+        trip_id=affected_trip_id,
+    )
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cq.message.answer(
+        "✅ Поездка и город сброшены. Можно начать с чистого листа.",
+        reply_markup=NO_TRIP_KB,
+    )
+    await cq.answer("Сброшено")
+
+
+@dp.callback_query(F.data == "trip_reset_cancel")
+async def cb_trip_reset_cancel(cq: CallbackQuery):
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cq.answer("Отменено")
 
 
 @dp.message(F.text == "➕ Новая поездка")
