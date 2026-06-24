@@ -50,7 +50,7 @@ from google.oauth2.service_account import Credentials
 # КОНФИГ
 # ──────────────────────────────────────────────────────────────
 BOT_TOKEN      = "8987086395:AAHN0YjaZTQoP28WPImnQguZrx5FPiXV8kw"
-OPENAI_KEY     = "sk-mfvVI3QN2uQvXPlhMkAeUUzmbjK5aQzj"
+OPENAI_KEY     = "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"
 OWNER_ID       = 549639607
 SPREADSHEET_ID = "1PE7CaFuWOe_eygQqIoMAmUdJBtATbIaNfZR4cvarPCA"
 SHEET_NAME     = "Аналитика Сочи"
@@ -362,7 +362,7 @@ class UserState(StatesGroup):
 # ──────────────────────────────────────────────────────────────
 bot    = Bot(token=BOT_TOKEN)
 dp     = Dispatcher(storage=MemoryStorage())
-client = OpenAI(api_key=OPENAI_KEY, base_url="https://api.proxyapi.ru/openai/v1")
+client = OpenAI(api_key=OPENAI_KEY)
 
 # Антифлуд: user_id → timestamp
 last_request_time: dict[int, float] = {}
