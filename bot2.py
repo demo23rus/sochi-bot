@@ -49,7 +49,7 @@ from google.oauth2.service_account import Credentials
 # ──────────────────────────────────────────────────────────────
 # КОНФИГ
 # ──────────────────────────────────────────────────────────────
-BOT_TOKEN      = "8987086395:AAHN0YjaZTQoP28WPImnQguZrx5FPiXV8kw"
+BOT_TOKEN      = "8987086395:AAFBo70oXwG6toBvfyRECwlUDItn3XCpXbc"
 OPENAI_KEY     = os.environ.get("OPENAI_KEY", "")
 OWNER_ID       = 549639607
 SPREADSHEET_ID = "1PE7CaFuWOe_eygQqIoMAmUdJBtATbIaNfZR4cvarPCA"
